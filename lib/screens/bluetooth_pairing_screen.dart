@@ -1,8 +1,15 @@
 import 'dart:async';
+import 'dart:io';
+
 import 'package:flutter/material.dart';
+import 'package:flutter_blue_plus/flutter_blue_plus.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import '../models/metawear_device.dart';
-import '../services/metawear_service.dart';
+import 'package:file_picker/file_picker.dart';
+
+import 'package:frontend_dataforninjafruit/models/metawear_device.dart';
+import 'package:frontend_dataforninjafruit/services/metawear_service.dart';
+import 'package:frontend_dataforninjafruit/services/metawear_protocol.dart';
 
 class BluetoothPairingScreen extends StatefulWidget {
   const BluetoothPairingScreen({super.key});
@@ -12,110 +19,154 @@ class BluetoothPairingScreen extends StatefulWidget {
 }
 
 class _BluetoothPairingScreenState extends State<BluetoothPairingScreen> {
-  final MetawearService _service = MetawearService();
+  final MetaWearService _service = MetaWearService();
   final List<MetawearDevice> _devices = [];
   bool _isScanning = false;
   StreamSubscription? _scanSubscription;
+  String _saveDir = '';
 
   @override
   void initState() {
     super.initState();
+    _loadSaveDir();
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      _startScan();
+      _requestPermissionsAndScan();
     });
   }
 
   @override
   void dispose() {
     _scanSubscription?.cancel();
-    _service.stopScan();
+    FlutterBluePlus.stopScan();
     super.dispose();
   }
 
+  Future<void> _loadSaveDir() async {
+    final dir = await _service.getSaveDir();
+    if (mounted) setState(() => _saveDir = dir);
+  }
+
+  Future<void> _pickFolder() async {
+    if (Platform.isAndroid) {
+      await Permission.manageExternalStorage.request();
+    }
+    final path = await FilePicker.platform.getDirectoryPath(
+      dialogTitle: 'Wybierz folder zapisu CSV',
+    );
+    if (path != null) {
+      await _service.setSaveDir(path);
+      if (mounted) setState(() => _saveDir = path);
+    }
+  }
+
+  Future<void> _requestPermissionsAndScan() async {
+    if (Platform.isAndroid) {
+      await [
+        Permission.bluetoothScan,
+        Permission.bluetoothConnect,
+        Permission.locationWhenInUse,
+      ].request();
+    }
+    _startScan();
+  }
+
   Future<void> _startScan() async {
+    if (_isScanning) return;
     setState(() {
       _devices.clear();
       _isScanning = true;
     });
 
     try {
+      await FlutterBluePlus.stopScan();
       _scanSubscription?.cancel();
-      _scanSubscription = _service.startScan().listen(
-        (device) {
+
+      _scanSubscription = FlutterBluePlus.scanResults.listen((results) {
+        for (final r in results) {
           if (!mounted) return;
-          if (!_devices.any((d) => d.id == device.id)) {
+          final name = r.device.platformName;
+          final uuids = r.advertisementData.serviceUuids
+              .map((u) => u.toString().toLowerCase())
+              .toList();
+          final isMetaWear =
+              name.toLowerCase().contains('metawear') ||
+              name.toLowerCase().contains('metamotion') ||
+              uuids.contains(kServiceUuid.toLowerCase());
+          if (isMetaWear && !_devices.any((d) => d.id == r.device.remoteId.str)) {
             setState(() {
-              _devices.add(device);
+              _devices.add(MetawearDevice(
+                id: r.device.remoteId.str,
+                name: name.isEmpty ? 'MetaWear (${r.device.remoteId.str})' : name,
+                rssi: r.rssi,
+              ));
             });
           }
-        },
-        onError: (e) {
-          if (!mounted) return;
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Błąd skanowania: $e')),
-          );
-          setState(() => _isScanning = false);
-        },
-      );
-      
-      // Auto stop scan after some time
-      Future.delayed(const Duration(seconds: 10), () {
-        if (mounted) setState(() => _isScanning = false);
+        }
       });
-      
+
+      await FlutterBluePlus.startScan(
+        withServices: [Guid(kServiceUuid)],
+        timeout: const Duration(seconds: 12),
+      );
+
+      await Future.delayed(const Duration(seconds: 13));
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Błąd uprawnień lub Bluetooth: $e')),
+          SnackBar(content: Text('Błąd skanowania: $e')),
         );
-        setState(() => _isScanning = false);
       }
+    } finally {
+      if (mounted) setState(() => _isScanning = false);
     }
   }
 
   Future<void> _connect(MetawearDevice device) async {
-    try {
-      showDialog(
-        context: context,
-        barrierDismissible: false,
-        builder: (context) => const Center(
-          child: Card(
-            child: Padding(
-              padding: EdgeInsets.all(20.0),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  CircularProgressIndicator(),
-                  SizedBox(height: 16),
-                  Text('Łączenie z urządzeniem MetaWear...'),
-                ],
-              ),
+    if (!mounted) return;
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => const Center(
+        child: Card(
+          child: Padding(
+            padding: EdgeInsets.all(24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                CircularProgressIndicator(),
+                SizedBox(height: 16),
+                Text('Łączenie z MetaWear...'),
+              ],
             ),
           ),
         ),
-      );
+      ),
+    );
 
+    try {
       await _service.connect(device.id);
-      
-      // Get the real model name from the board
-      final modelName = await _service.getModel(device.id);
+      await _service.initializeBoard();
 
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString('pairedDeviceName', device.name);
       await prefs.setString('pairedDeviceId', device.id);
-      await prefs.setString('pairedDeviceType', modelName);
+      await prefs.setString('pairedDeviceType', 'MetaMotion');
 
       if (!mounted) return;
-      Navigator.of(context, rootNavigator: true).pop(); // Close loading dialog
-      
+      Navigator.of(context, rootNavigator: true).pop();
+
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Połączono z $modelName!')),
+        SnackBar(content: Text('Połączono z ${device.name}!')),
       );
 
-      Navigator.pushReplacementNamed(context, '/home');
+      Navigator.pushReplacementNamed(
+        context,
+        '/home',
+        arguments: _service,
+      );
     } catch (e) {
       if (mounted) {
-        Navigator.of(context, rootNavigator: true).pop(); // Close loading dialog
+        Navigator.of(context, rootNavigator: true).pop();
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Błąd połączenia: $e')),
         );
@@ -132,17 +183,18 @@ class _BluetoothPairingScreenState extends State<BluetoothPairingScreen> {
           if (_isScanning)
             const Center(
               child: Padding(
-                padding: EdgeInsets.all(16.0),
+                padding: EdgeInsets.all(16),
                 child: SizedBox(
                   width: 20,
                   height: 20,
-                  child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                  child: CircularProgressIndicator(strokeWidth: 2),
                 ),
               ),
             )
           else
             IconButton(
               icon: const Icon(Icons.refresh),
+              tooltip: 'Skanuj ponownie',
               onPressed: _startScan,
             ),
         ],
@@ -157,41 +209,124 @@ class _BluetoothPairingScreenState extends State<BluetoothPairingScreen> {
         ),
         child: Column(
           children: [
-            const Padding(
-              padding: EdgeInsets.all(16.0),
-              child: Text(
-                'Wyszukiwanie czujników MetaMotion...',
-                textAlign: TextAlign.center,
-                style: TextStyle(color: Color(0xFF4B5563)),
+            // ── Folder zapisu ──────────────────────────────────────────────
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+              child: InkWell(
+                onTap: _pickFolder,
+                borderRadius: BorderRadius.circular(12),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: const Color(0xFFE5E7EB)),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withOpacity(0.04),
+                        blurRadius: 6,
+                        offset: const Offset(0, 2),
+                      ),
+                    ],
+                  ),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.folder_open, color: Colors.amber),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Text(
+                              'Folder zapisu CSV',
+                              style: TextStyle(
+                                fontSize: 11,
+                                color: Color(0xFF6B7280),
+                              ),
+                            ),
+                            const SizedBox(height: 2),
+                            Text(
+                              _saveDir.isEmpty ? 'Dotknij aby wybrać...' : _saveDir,
+                              style: TextStyle(
+                                fontSize: 12,
+                                fontFamily: 'monospace',
+                                color: _saveDir.isEmpty
+                                    ? const Color(0xFF9CA3AF)
+                                    : const Color(0xFF1D4ED8),
+                              ),
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ],
+                        ),
+                      ),
+                      const Icon(Icons.chevron_right, color: Color(0xFF9CA3AF)),
+                    ],
+                  ),
+                ),
               ),
             ),
+
+            const SizedBox(height: 10),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: Text(
+                _isScanning
+                    ? 'Szukam czujników MetaMotion w pobliżu...'
+                    : _devices.isEmpty
+                        ? 'Nie znaleziono urządzeń'
+                        : 'Wybierz urządzenie z listy',
+                textAlign: TextAlign.center,
+                style: const TextStyle(fontSize: 13, color: Color(0xFF4B5563)),
+              ),
+            ),
+            const SizedBox(height: 4),
+
+            // ── Lista urządzeń ─────────────────────────────────────────────
             Expanded(
-              child: _devices.isEmpty && !_isScanning
+              child: _devices.isEmpty
                   ? Center(
                       child: Column(
                         mainAxisAlignment: MainAxisAlignment.center,
                         children: [
-                          const Icon(Icons.bluetooth_searching, size: 64, color: Colors.grey),
-                          const SizedBox(height: 16),
-                          const Text('Nie znaleziono urządzeń w pobliżu'),
-                          const SizedBox(height: 8),
-                          ElevatedButton(
-                            onPressed: _startScan,
-                            child: const Text('Skanuj ponownie'),
+                          Icon(
+                            _isScanning
+                                ? Icons.bluetooth_searching
+                                : Icons.bluetooth_disabled,
+                            size: 64,
+                            color: Colors.grey,
                           ),
+                          const SizedBox(height: 16),
+                          Text(
+                            _isScanning ? 'Skanowanie...' : 'Nie znaleziono urządzeń',
+                            style: const TextStyle(color: Colors.grey),
+                          ),
+                          if (!_isScanning) ...[
+                            const SizedBox(height: 12),
+                            ElevatedButton.icon(
+                              onPressed: _startScan,
+                              icon: const Icon(Icons.refresh),
+                              label: const Text('Skanuj ponownie'),
+                            ),
+                          ],
                         ],
                       ),
                     )
                   : ListView.builder(
-                      padding: const EdgeInsets.all(8),
+                      padding: const EdgeInsets.all(12),
                       itemCount: _devices.length,
                       itemBuilder: (context, index) {
                         final device = _devices[index];
                         return Card(
                           elevation: 2,
-                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(14),
+                          ),
                           margin: const EdgeInsets.symmetric(vertical: 6, horizontal: 4),
                           child: ListTile(
+                            contentPadding: const EdgeInsets.symmetric(
+                              horizontal: 16,
+                              vertical: 8,
+                            ),
                             leading: const CircleAvatar(
                               backgroundColor: Color(0xFFDBEAFE),
                               child: Icon(Icons.bluetooth, color: Color(0xFF3B82F6)),
@@ -200,9 +335,31 @@ class _BluetoothPairingScreenState extends State<BluetoothPairingScreen> {
                               device.name,
                               style: const TextStyle(fontWeight: FontWeight.bold),
                             ),
-                            subtitle: Text('MAC: ${device.id}'),
-                            trailing: const Icon(Icons.link),
-                            onTap: () => _connect(device),
+                            subtitle: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text('MAC: ${device.id}'),
+                                Text(
+                                  'Sygnał: ${device.rssi} dBm',
+                                  style: const TextStyle(
+                                    fontSize: 11,
+                                    color: Color(0xFF6B7280),
+                                  ),
+                                ),
+                              ],
+                            ),
+                            trailing: ElevatedButton(
+                              onPressed: () => _connect(device),
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: const Color(0xFF3B82F6),
+                                foregroundColor: Colors.white,
+                                minimumSize: const Size(80, 36),
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(10),
+                                ),
+                              ),
+                              child: const Text('Połącz'),
+                            ),
                           ),
                         );
                       },
