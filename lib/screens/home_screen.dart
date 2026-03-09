@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:frontend_dataforninjafruit/models/user.dart';
+import '../services/metawear_service.dart';
 
 class Movement {
   final int id;
@@ -63,6 +64,7 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> {
+  final MetawearService _bleService = MetawearService();
   final List<Movement> _movements = const [
     Movement(id: 1, name: 'Fala', icon: Icons.waves),
     Movement(id: 2, name: 'Machanie', icon: Icons.pan_tool_alt),
@@ -79,18 +81,25 @@ class _HomeScreenState extends State<HomeScreen> {
   Timer? _timer;
   List<Measurement> _measurements = [];
   AppUser? _currentUser;
+  String _pairedDeviceName = '';
+  String _pairedDeviceId = '';
+  String _pairedDeviceType = '';
 
   @override
   void initState() {
     super.initState();
     _selectedMovement = _movements.first;
     _loadCurrentUser();
+    _loadPairedDevice();
     _loadMeasurements();
   }
 
   @override
   void dispose() {
     _timer?.cancel();
+    if (_isRecording && _pairedDeviceId.isNotEmpty) {
+      _bleService.stopStreaming(_pairedDeviceId);
+    }
     super.dispose();
   }
 
@@ -108,6 +117,19 @@ class _HomeScreenState extends State<HomeScreen> {
         _currentUser = user;
       });
     } catch (_) {}
+  }
+
+  Future<void> _loadPairedDevice() async {
+    final prefs = await _prefs();
+    final name = prefs.getString('pairedDeviceName') ?? '';
+    final id = prefs.getString('pairedDeviceId') ?? '';
+    final type = prefs.getString('pairedDeviceType') ?? '';
+    if (!mounted) return;
+    setState(() {
+      _pairedDeviceName = name;
+      _pairedDeviceId = id;
+      _pairedDeviceType = type;
+    });
   }
 
   Future<void> _loadMeasurements() async {
@@ -142,12 +164,34 @@ class _HomeScreenState extends State<HomeScreen> {
     return '$mm:$ss';
   }
 
-  void _toggleRecording() {
+  void _flashDevice() {
+    if (_pairedDeviceId.isNotEmpty) {
+      _bleService.flashLed(_pairedDeviceId).catchError((e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Błąd diody: $e')),
+          );
+        }
+      });
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Brak połączonego urządzenia')),
+      );
+    }
+  }
+
+  Future<void> _toggleRecording() async {
     if (_isRecording) {
+      // STOP RECORDING
       setState(() {
         _isRecording = false;
       });
       _timer?.cancel();
+
+      if (_pairedDeviceId.isNotEmpty) {
+        await _bleService.stopStreaming(_pairedDeviceId);
+      }
+
       final measurement = Measurement(
         id: DateTime.now().millisecondsSinceEpoch.toString(),
         movement: _selectedMovement?.name ?? '',
@@ -166,6 +210,20 @@ class _HomeScreenState extends State<HomeScreen> {
         });
       });
     } else {
+      // START RECORDING
+      if (_pairedDeviceId.isNotEmpty) {
+        try {
+          await _bleService.startStreaming(_pairedDeviceId);
+        } catch (e) {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text('Błąd strumieniowania: $e')),
+            );
+          }
+          return; // Don't start timer if BLE fails
+        }
+      }
+
       setState(() {
         _recordingTime = 0;
         _isRecording = true;
@@ -325,34 +383,70 @@ class _HomeScreenState extends State<HomeScreen> {
       elevation: 2,
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        child: Column(
           children: [
-            Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                const Text(
-                  'Zalogowany jako',
-                  style: TextStyle(
-                    fontSize: 13,
-                    color: Color(0xFF6B7280),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'Zalogowany jako',
+                        style: TextStyle(
+                          fontSize: 13,
+                          color: Color(0xFF6B7280),
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        name,
+                        style: const TextStyle(
+                          fontSize: 15,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ],
                   ),
                 ),
-                const SizedBox(height: 2),
-                Text(
-                  name,
-                  style: const TextStyle(
-                    fontSize: 15,
-                    fontWeight: FontWeight.w600,
-                  ),
+                const SizedBox(width: 8),
+                OutlinedButton.icon(
+                  onPressed: _logout,
+                  icon: const Icon(Icons.logout, size: 18),
+                  label: const Text('Wyloguj'),
                 ),
               ],
             ),
-            OutlinedButton.icon(
-              onPressed: _logout,
-              icon: const Icon(Icons.logout, size: 18),
-              label: const Text('Wyloguj'),
-            ),
+            if (_pairedDeviceId.isNotEmpty) ...[
+              const Divider(height: 24),
+              Row(
+                children: [
+                  const Icon(Icons.bluetooth_connected, size: 20, color: Colors.blue),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Urządzenie: $_pairedDeviceName',
+                          style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500),
+                        ),
+                        Text(
+                          'MAC: $_pairedDeviceId | Typ: ${_pairedDeviceType.isEmpty ? 'C (Auto)' : _pairedDeviceType}',
+                          style: const TextStyle(fontSize: 11, color: Colors.grey),
+                        ),
+                      ],
+                    ),
+                  ),
+                  IconButton(
+                    onPressed: _flashDevice,
+                    icon: const Icon(Icons.lightbulb_outline, color: Colors.orange),
+                    tooltip: 'Zaświeć diodą',
+                  ),
+                ],
+              ),
+            ],
           ],
         ),
       ),

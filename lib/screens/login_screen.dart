@@ -55,7 +55,7 @@ class _LoginScreenState extends State<LoginScreen> with SingleTickerProviderStat
     final current = prefs.getString('currentUser');
     if (!mounted) return;
     if (current != null && current.isNotEmpty) {
-      Navigator.of(context).pushNamedAndRemoveUntil('/home', (route) => false);
+      Navigator.of(context).pushNamedAndRemoveUntil('/pairing', (route) => false);
     }
   }
 
