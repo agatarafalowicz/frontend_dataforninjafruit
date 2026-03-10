@@ -5,30 +5,31 @@ import 'package:flutter/material.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:file_picker/file_picker.dart';
 
 import 'package:frontend_dataforninjafruit/models/metawear_device.dart';
 import 'package:frontend_dataforninjafruit/services/metawear_service.dart';
 import 'package:frontend_dataforninjafruit/services/metawear_protocol.dart';
+import 'package:frontend_dataforninjafruit/theme/app_theme.dart';
 
 class BluetoothPairingScreen extends StatefulWidget {
-  const BluetoothPairingScreen({super.key});
+  final MetaWearService? service;
+
+  const BluetoothPairingScreen({super.key, this.service});
 
   @override
   State<BluetoothPairingScreen> createState() => _BluetoothPairingScreenState();
 }
 
 class _BluetoothPairingScreenState extends State<BluetoothPairingScreen> {
-  final MetaWearService _service = MetaWearService();
+  late final MetaWearService _service;
   final List<MetawearDevice> _devices = [];
   bool _isScanning = false;
   StreamSubscription? _scanSubscription;
-  String _saveDir = '';
 
   @override
   void initState() {
     super.initState();
-    _loadSaveDir();
+    _service = widget.service ?? MetaWearService();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _requestPermissionsAndScan();
     });
@@ -39,24 +40,6 @@ class _BluetoothPairingScreenState extends State<BluetoothPairingScreen> {
     _scanSubscription?.cancel();
     FlutterBluePlus.stopScan();
     super.dispose();
-  }
-
-  Future<void> _loadSaveDir() async {
-    final dir = await _service.getSaveDir();
-    if (mounted) setState(() => _saveDir = dir);
-  }
-
-  Future<void> _pickFolder() async {
-    if (Platform.isAndroid) {
-      await Permission.manageExternalStorage.request();
-    }
-    final path = await FilePicker.platform.getDirectoryPath(
-      dialogTitle: 'Wybierz folder zapisu CSV',
-    );
-    if (path != null) {
-      await _service.setSaveDir(path);
-      if (mounted) setState(() => _saveDir = path);
-    }
   }
 
   Future<void> _requestPermissionsAndScan() async {
@@ -92,13 +75,18 @@ class _BluetoothPairingScreenState extends State<BluetoothPairingScreen> {
               name.toLowerCase().contains('metawear') ||
               name.toLowerCase().contains('metamotion') ||
               uuids.contains(kServiceUuid.toLowerCase());
-          if (isMetaWear && !_devices.any((d) => d.id == r.device.remoteId.str)) {
+          if (isMetaWear &&
+              !_devices.any((d) => d.id == r.device.remoteId.str)) {
             setState(() {
-              _devices.add(MetawearDevice(
-                id: r.device.remoteId.str,
-                name: name.isEmpty ? 'MetaWear (${r.device.remoteId.str})' : name,
-                rssi: r.rssi,
-              ));
+              _devices.add(
+                MetawearDevice(
+                  id: r.device.remoteId.str,
+                  name: name.isEmpty
+                      ? 'MetaWear (${r.device.remoteId.str})'
+                      : name,
+                  rssi: r.rssi,
+                ),
+              );
             });
           }
         }
@@ -112,9 +100,9 @@ class _BluetoothPairingScreenState extends State<BluetoothPairingScreen> {
       await Future.delayed(const Duration(seconds: 13));
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Błąd skanowania: $e')),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Błąd skanowania: $e')));
       }
     } finally {
       if (mounted) setState(() => _isScanning = false);
@@ -155,21 +143,19 @@ class _BluetoothPairingScreenState extends State<BluetoothPairingScreen> {
       if (!mounted) return;
       Navigator.of(context, rootNavigator: true).pop();
 
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Połączono z ${device.name}!')),
-      );
-
-      Navigator.pushReplacementNamed(
-        context,
-        '/home',
-        arguments: _service,
-      );
+      if (Navigator.of(context).canPop()) {
+        Navigator.of(context).pop(_service);
+      } else {
+        Navigator.of(
+          context,
+        ).pushNamedAndRemoveUntil('/home', (_) => false, arguments: _service);
+      }
     } catch (e) {
       if (mounted) {
         Navigator.of(context, rootNavigator: true).pop();
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Błąd połączenia: $e')),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Błąd połączenia: $e')));
       }
     }
   }
@@ -200,83 +186,82 @@ class _BluetoothPairingScreenState extends State<BluetoothPairingScreen> {
         ],
       ),
       body: Container(
-        decoration: const BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-            colors: [Color(0xFFE0E7FF), Color(0xFFEDE9FE)],
-          ),
-        ),
+        decoration: const BoxDecoration(gradient: AppColors.pageGradient),
         child: Column(
           children: [
-            // ── Folder zapisu ──────────────────────────────────────────────
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
-              child: InkWell(
-                onTap: _pickFolder,
-                borderRadius: BorderRadius.circular(12),
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-                  decoration: BoxDecoration(
-                    color: Colors.white,
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(color: const Color(0xFFE5E7EB)),
-                    boxShadow: [
-                      BoxShadow(
-                        color: Colors.black.withOpacity(0.04),
-                        blurRadius: 6,
-                        offset: const Offset(0, 2),
-                      ),
-                    ],
-                  ),
-                  child: Row(
-                    children: [
-                      const Icon(Icons.folder_open, color: Colors.amber),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            const Text(
-                              'Folder zapisu CSV',
-                              style: TextStyle(
-                                fontSize: 11,
-                                color: Color(0xFF6B7280),
-                              ),
-                            ),
-                            const SizedBox(height: 2),
-                            Text(
-                              _saveDir.isEmpty ? 'Dotknij aby wybrać...' : _saveDir,
-                              style: TextStyle(
-                                fontSize: 12,
-                                fontFamily: 'monospace',
-                                color: _saveDir.isEmpty
-                                    ? const Color(0xFF9CA3AF)
-                                    : const Color(0xFF1D4ED8),
-                              ),
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                          ],
-                        ),
-                      ),
-                      const Icon(Icons.chevron_right, color: Color(0xFF9CA3AF)),
-                    ],
-                  ),
-                ),
-              ),
-            ),
+            // // ── Folder zapisu ──────────────────────────────────────────────
+            // Padding(
+            //   padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+            //   child: InkWell(
+            //     onTap: _pickFolder,
+            //     borderRadius: BorderRadius.circular(12),
+            //     child: Container(
+            //       padding: const EdgeInsets.symmetric(
+            //         horizontal: 14,
+            //         vertical: 12,
+            //       ),
+            //       decoration: BoxDecoration(
+            //         color: Colors.white,
+            //         borderRadius: BorderRadius.circular(12),
+            //         border: Border.all(color: const Color(0xFFE5E7EB)),
+            //         boxShadow: [
+            //           BoxShadow(
+            //             color: Colors.black.withValues(alpha: .04),
+            //             // color: Colors.black.withOpacity(0.04),
+            //             blurRadius: 6,
+            //             offset: const Offset(0, 2),
+            //           ),
+            //         ],
+            //       ),
+            //       child: Row(
+            //         children: [
+            //           const Icon(Icons.folder_open, color: Colors.amber),
+            //           const SizedBox(width: 12),
+            //           Expanded(
+            //             child: Column(
+            //               crossAxisAlignment: CrossAxisAlignment.start,
+            //               children: [
+            //                 const Text(
+            //                   'Folder zapisu CSV',
+            //                   style: TextStyle(
+            //                     fontSize: 11,
+            //                     color: Color(0xFF6B7280),
+            //                   ),
+            //                 ),
+            //                 const SizedBox(height: 2),
+            //                 Text(
+            //                   _saveDir.isEmpty
+            //                       ? 'Dotknij aby wybrać...'
+            //                       : _saveDir,
+            //                   style: TextStyle(
+            //                     fontSize: 12,
+            //                     fontFamily: 'monospace',
+            //                     color: _saveDir.isEmpty
+            //                         ? const Color(0xFF9CA3AF)
+            //                         : const Color(0xFF1D4ED8),
+            //                   ),
+            //                   overflow: TextOverflow.ellipsis,
+            //                 ),
+            //               ],
+            //             ),
+            //           ),
+            //           const Icon(Icons.chevron_right, color: Color(0xFF9CA3AF)),
+            //         ],
+            //       ),
+            //     ),
+            //   ),
+            // ),
 
-            const SizedBox(height: 10),
+            // const SizedBox(height: 10),
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 16),
               child: Text(
-                _isScanning
-                    ? 'Szukam czujników MetaMotion w pobliżu...'
-                    : _devices.isEmpty
-                        ? 'Nie znaleziono urządzeń'
-                        : 'Wybierz urządzenie z listy',
+                'Wybierz urządzenie z listy',
                 textAlign: TextAlign.center,
-                style: const TextStyle(fontSize: 13, color: Color(0xFF4B5563)),
+                style: const TextStyle(
+                  fontSize: 13,
+                  color: AppColors.textSecondary,
+                ),
               ),
             ),
             const SizedBox(height: 4),
@@ -293,12 +278,14 @@ class _BluetoothPairingScreenState extends State<BluetoothPairingScreen> {
                                 ? Icons.bluetooth_searching
                                 : Icons.bluetooth_disabled,
                             size: 64,
-                            color: Colors.grey,
+                            color: AppColors.textMuted,
                           ),
                           const SizedBox(height: 16),
                           Text(
-                            _isScanning ? 'Skanowanie...' : 'Nie znaleziono urządzeń',
-                            style: const TextStyle(color: Colors.grey),
+                            _isScanning
+                                ? 'Skanowanie...'
+                                : 'Nie znaleziono urządzeń',
+                            style: const TextStyle(color: AppColors.textMuted),
                           ),
                           if (!_isScanning) ...[
                             const SizedBox(height: 12),
@@ -321,19 +308,27 @@ class _BluetoothPairingScreenState extends State<BluetoothPairingScreen> {
                           shape: RoundedRectangleBorder(
                             borderRadius: BorderRadius.circular(14),
                           ),
-                          margin: const EdgeInsets.symmetric(vertical: 6, horizontal: 4),
+                          margin: const EdgeInsets.symmetric(
+                            vertical: 6,
+                            horizontal: 4,
+                          ),
                           child: ListTile(
                             contentPadding: const EdgeInsets.symmetric(
                               horizontal: 16,
                               vertical: 8,
                             ),
                             leading: const CircleAvatar(
-                              backgroundColor: Color(0xFFDBEAFE),
-                              child: Icon(Icons.bluetooth, color: Color(0xFF3B82F6)),
+                              backgroundColor: AppColors.primarySoft,
+                              child: Icon(
+                                Icons.bluetooth,
+                                color: AppColors.primary,
+                              ),
                             ),
                             title: Text(
                               device.name,
-                              style: const TextStyle(fontWeight: FontWeight.bold),
+                              style: const TextStyle(
+                                fontWeight: FontWeight.bold,
+                              ),
                             ),
                             subtitle: Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
@@ -343,7 +338,7 @@ class _BluetoothPairingScreenState extends State<BluetoothPairingScreen> {
                                   'Sygnał: ${device.rssi} dBm',
                                   style: const TextStyle(
                                     fontSize: 11,
-                                    color: Color(0xFF6B7280),
+                                    color: AppColors.textMuted,
                                   ),
                                 ),
                               ],
@@ -351,7 +346,7 @@ class _BluetoothPairingScreenState extends State<BluetoothPairingScreen> {
                             trailing: ElevatedButton(
                               onPressed: () => _connect(device),
                               style: ElevatedButton.styleFrom(
-                                backgroundColor: const Color(0xFF3B82F6),
+                                backgroundColor: AppColors.primary,
                                 foregroundColor: Colors.white,
                                 minimumSize: const Size(80, 36),
                                 shape: RoundedRectangleBorder(
