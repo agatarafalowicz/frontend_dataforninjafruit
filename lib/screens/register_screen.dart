@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:frontend_dataforninjafruit/theme/app_theme.dart';
 
 class RegisterScreen extends StatefulWidget {
   const RegisterScreen({super.key});
@@ -55,16 +56,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
 
     return Scaffold(
       body: Container(
-        decoration: const BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-            colors: [
-              Color(0xFF6C4CF5),
-              Color(0xFF22C55E),
-            ],
-          ),
-        ),
+        decoration: const BoxDecoration(gradient: AppColors.pageGradient),
         child: SafeArea(
           child: Center(
             child: SingleChildScrollView(
@@ -77,7 +69,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
                 child: IntrinsicHeight(
                   child: Card(
                     elevation: 0,
-                    color: Colors.white,
+                    color: AppColors.surface,
                     shape: RoundedRectangleBorder(
                       borderRadius: BorderRadius.circular(22),
                     ),
@@ -93,18 +85,15 @@ class _RegisterScreenState extends State<RegisterScreen> {
                             Text(
                               'Załóż konto',
                               textAlign: TextAlign.center,
-                              style: Theme.of(context)
-                                  .textTheme
-                                  .headlineSmall
+                              style: Theme.of(context).textTheme.headlineSmall
                                   ?.copyWith(fontWeight: FontWeight.w800),
                             ),
                             const SizedBox(height: 6),
                             Text(
                               'Utwórz konto w kilka sekund.',
                               textAlign: TextAlign.center,
-                              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                                    color: const Color(0xFF6B7280),
-                                  ),
+                              style: Theme.of(context).textTheme.bodyMedium
+                                  ?.copyWith(color: AppColors.textMuted),
                             ),
                             const SizedBox(height: 18),
                             TextFormField(
@@ -121,12 +110,15 @@ class _RegisterScreenState extends State<RegisterScreen> {
                               validator: (value) {
                                 final v = (value ?? '').trim();
                                 if (v.isEmpty) return 'Podaj email';
-                                if (!RegExp(r'^[^@\s]+@[^@\s]+\.[^@\s]+$').hasMatch(v)) {
+                                if (!RegExp(
+                                  r'^[^@\s]+@[^@\s]+\.[^@\s]+$',
+                                ).hasMatch(v)) {
                                   return 'Niepoprawny email';
                                 }
                                 return null;
                               },
-                              onFieldSubmitted: (_) => _passwordFocus.requestFocus(),
+                              onFieldSubmitted: (_) =>
+                                  _passwordFocus.requestFocus(),
                             ),
                             const SizedBox(height: 12),
                             TextFormField(
@@ -140,7 +132,9 @@ class _RegisterScreenState extends State<RegisterScreen> {
                                     () => _obscurePassword = !_obscurePassword,
                                   ),
                                   icon: Icon(
-                                    _obscurePassword ? Icons.visibility : Icons.visibility_off,
+                                    _obscurePassword
+                                        ? Icons.visibility
+                                        : Icons.visibility_off,
                                   ),
                                 ),
                               ),
@@ -158,7 +152,8 @@ class _RegisterScreenState extends State<RegisterScreen> {
                                   _formKey.currentState?.validate();
                                 }
                               },
-                              onFieldSubmitted: (_) => _confirmFocus.requestFocus(),
+                              onFieldSubmitted: (_) =>
+                                  _confirmFocus.requestFocus(),
                             ),
                             const SizedBox(height: 12),
                             TextFormField(
@@ -172,7 +167,9 @@ class _RegisterScreenState extends State<RegisterScreen> {
                                     () => _obscureConfirm = !_obscureConfirm,
                                   ),
                                   icon: Icon(
-                                    _obscureConfirm ? Icons.visibility : Icons.visibility_off,
+                                    _obscureConfirm
+                                        ? Icons.visibility
+                                        : Icons.visibility_off,
                                   ),
                                 ),
                               ),

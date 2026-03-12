@@ -1,22 +1,27 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:typed_data';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:file_picker/file_picker.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:frontend_dataforninjafruit/models/user.dart';
+import 'package:frontend_dataforninjafruit/screens/bluetooth_pairing_screen.dart';
+import 'package:frontend_dataforninjafruit/theme/app_theme.dart';
+import '../services/metawear_service.dart';
+import '../services/metawear_protocol.dart';
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Modele lokalne
+// ─────────────────────────────────────────────────────────────────────────────
 
 class Movement {
   final int id;
   final String name;
   final IconData icon;
-
-  const Movement({
-    required this.id,
-    required this.name,
-    required this.icon,
-  });
+  const Movement({required this.id, required this.name, required this.icon});
 }
 
 class Measurement {
@@ -25,6 +30,7 @@ class Measurement {
   final String side;
   final double duration;
   final int timestamp;
+  final List<String> csvPaths;
 
   Measurement({
     required this.id,
@@ -32,28 +38,35 @@ class Measurement {
     required this.side,
     required this.duration,
     required this.timestamp,
+    this.csvPaths = const [],
   });
 
-  factory Measurement.fromJson(Map<String, dynamic> json) {
-    return Measurement(
-      id: json['id'] as String,
-      movement: json['movement'] as String,
-      side: json['side'] as String,
-      duration: (json['duration'] as num).toDouble(),
-      timestamp: json['timestamp'] as int,
-    );
-  }
+  factory Measurement.fromJson(Map<String, dynamic> json) => Measurement(
+    id: json['id'] as String,
+    movement: json['movement'] as String,
+    side: json['side'] as String,
+    duration: (json['duration'] as num).toDouble(),
+    timestamp: json['timestamp'] as int,
+    csvPaths:
+        (json['csvPaths'] as List<dynamic>?)
+            ?.map((e) => e as String)
+            .toList() ??
+        [],
+  );
 
-  Map<String, dynamic> toJson() {
-    return {
-      'id': id,
-      'movement': movement,
-      'side': side,
-      'duration': duration,
-      'timestamp': timestamp,
-    };
-  }
+  Map<String, dynamic> toJson() => {
+    'id': id,
+    'movement': movement,
+    'side': side,
+    'duration': duration,
+    'timestamp': timestamp,
+    'csvPaths': csvPaths,
+  };
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// HomeScreen
+// ─────────────────────────────────────────────────────────────────────────────
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -63,11 +76,29 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> {
+  // ── Serwis BLE ─────────────────────────────────────────────────────────────
+  late MetaWearService _bleService;
+  StreamSubscription? _accSub;
+  StreamSubscription? _gyroSub;
+
+  // ── Dane z sensorów ────────────────────────────────────────────────────────
+  SensorSample? _acc;
+  SensorSample? _gyro;
+
+  // ── Lista ruchów ──────────────────────────────────────────────────────────
   final List<Movement> _movements = const [
     Movement(id: 1, name: 'Fala', icon: Icons.waves),
     Movement(id: 2, name: 'Machanie', icon: Icons.pan_tool_alt),
-    Movement(id: 3, name: 'Okrąg (zgodnie ze wskazówkami zegara)', icon: Icons.rotate_right),
-    Movement(id: 4, name: 'Okrąg (przeciwnie do wskazówek zegara)', icon: Icons.rotate_left),
+    Movement(
+      id: 3,
+      name: 'Okrąg (zgodnie ze wskazówkami zegara)',
+      icon: Icons.rotate_right,
+    ),
+    Movement(
+      id: 4,
+      name: 'Okrąg (przeciwnie do wskazówek zegara)',
+      icon: Icons.rotate_left,
+    ),
     Movement(id: 5, name: 'Góra-dół', icon: Icons.swap_vert),
     Movement(id: 6, name: 'Inne ruchy', icon: Icons.more_horiz),
   ];
@@ -77,25 +108,101 @@ class _HomeScreenState extends State<HomeScreen> {
   bool _isRecording = false;
   double _recordingTime = 0;
   Timer? _timer;
+
   List<Measurement> _measurements = [];
   AppUser? _currentUser;
+
+  // ── Info o urządzeniu ──────────────────────────────────────────────────────
+  String _pairedDeviceName = '';
+  String _pairedDeviceId = '';
+
+  // ── Folder zapisu ─────────────────────────────────────────────────────────
+  String _saveDir = '';
 
   @override
   void initState() {
     super.initState();
     _selectedMovement = _movements.first;
+    _bleService = MetaWearService();
+    _subscribeSensors();
+    _loadSaveDir();
+
+    // Pobierz serwis przekazany z nawigacji, jeśli ekran został otwarty po parowaniu.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final args = ModalRoute.of(context)?.settings.arguments;
+      if (args is MetaWearService && !identical(args, _bleService)) {
+        _attachBleService(args);
+      }
+    });
+
     _loadCurrentUser();
+    _loadPairedDevice();
     _loadMeasurements();
+  }
+
+  void _attachBleService(MetaWearService service) {
+    _accSub?.cancel();
+    _gyroSub?.cancel();
+    _bleService = service;
+    _subscribeSensors();
+    _loadSaveDir();
+  }
+
+  void _subscribeSensors() {
+    _accSub = _bleService.accStream.listen((s) => setState(() => _acc = s));
+    _gyroSub = _bleService.gyroStream.listen((s) => setState(() => _gyro = s));
   }
 
   @override
   void dispose() {
     _timer?.cancel();
+    _accSub?.cancel();
+    _gyroSub?.cancel();
+    if (_isRecording) _bleService.stopIMU();
     super.dispose();
   }
 
-  Future<SharedPreferences> _prefs() {
-    return SharedPreferences.getInstance();
+  Future<SharedPreferences> _prefs() => SharedPreferences.getInstance();
+
+  Future<void> _loadSaveDir() async {
+    final dir = await _bleService.getSaveDir();
+    if (mounted) setState(() => _saveDir = dir);
+  }
+
+  Future<void> _pickFolder() async {
+    if (Platform.isAndroid) {
+      await Permission.manageExternalStorage.request();
+    }
+    final path = await FilePicker.platform.getDirectoryPath(
+      dialogTitle: 'Wybierz folder zapisu CSV',
+    );
+    if (path != null) {
+      await _bleService.setSaveDir(path);
+      if (mounted) setState(() => _saveDir = path);
+    }
+  }
+
+  Future<void> _openPairing() async {
+    final result = await Navigator.of(context).push<MetaWearService>(
+      MaterialPageRoute(
+        builder: (_) => BluetoothPairingScreen(service: _bleService),
+      ),
+    );
+
+    if (result == null) {
+      return;
+    }
+
+    if (!identical(result, _bleService)) {
+      _attachBleService(result);
+    }
+
+    await _loadPairedDevice();
+    if (mounted) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Parowanie zakończone.')));
+    }
   }
 
   Future<void> _loadCurrentUser() async {
@@ -103,11 +210,16 @@ class _HomeScreenState extends State<HomeScreen> {
     final value = prefs.getString('currentUser');
     if (value == null || value.isEmpty) return;
     try {
-      final user = AppUser.fromJsonString(value);
-      setState(() {
-        _currentUser = user;
-      });
+      setState(() => _currentUser = AppUser.fromJsonString(value));
     } catch (_) {}
+  }
+
+  Future<void> _loadPairedDevice() async {
+    final prefs = await _prefs();
+    setState(() {
+      _pairedDeviceName = prefs.getString('pairedDeviceName') ?? '';
+      _pairedDeviceId = prefs.getString('pairedDeviceId') ?? '';
+    });
   }
 
   Future<void> _loadMeasurements() async {
@@ -115,14 +227,13 @@ class _HomeScreenState extends State<HomeScreen> {
     final value = prefs.getString('measurements');
     if (value == null || value.isEmpty) return;
     try {
-      final dynamic parsed = jsonDecode(value);
+      final parsed = jsonDecode(value);
       if (parsed is List) {
-        final list = parsed
-            .whereType<Map<String, dynamic>>()
-            .map((e) => Measurement.fromJson(e))
-            .toList();
         setState(() {
-          _measurements = list;
+          _measurements = parsed
+              .whereType<Map<String, dynamic>>()
+              .map((e) => Measurement.fromJson(e))
+              .toList();
         });
       }
     } catch (_) {}
@@ -130,113 +241,194 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _saveMeasurements() async {
     final prefs = await _prefs();
-    final data = _measurements.map((e) => e.toJson()).toList();
-    await prefs.setString('measurements', jsonEncode(data));
+    await prefs.setString(
+      'measurements',
+      jsonEncode(_measurements.map((e) => e.toJson()).toList()),
+    );
   }
 
   String _formatTime(double seconds) {
     final mins = seconds ~/ 60;
     final secs = seconds.truncate() % 60;
-    final mm = mins.toString().padLeft(2, '0');
-    final ss = secs.toString().padLeft(2, '0');
-    return '$mm:$ss';
+    return '${mins.toString().padLeft(2, '0')}:${secs.toString().padLeft(2, '0')}';
   }
 
-  void _toggleRecording() {
+  // ── Start / Stop nagrywania ────────────────────────────────────────────────
+  Future<void> _toggleRecording() async {
     if (_isRecording) {
-      setState(() {
-        _isRecording = false;
-      });
+      // STOP
+      setState(() => _isRecording = false);
       _timer?.cancel();
+
+      List<String> paths = [];
+      if (_bleService.isConnected) {
+        paths = await _bleService.stopIMU();
+      }
+
+      final movement = _selectedMovement?.name ?? 'Nieznany';
+      final side = _selectedSide == 'left' ? 'Lewa' : 'Prawa';
+
+      // Zmień nazwy plików, żeby zawierały nazwę ruchu i stronę
+      final renamedPaths = <String>[];
+      for (final p in paths) {
+        try {
+          final file = File(p);
+          final dir = file.parent.path;
+          final oldName = file.uri.pathSegments.last;
+          // Wstaw nazwę ruchu przed rozszerzeniem
+          final movementSlug = movement
+              .replaceAll(' ', '_')
+              .replaceAll('(', '')
+              .replaceAll(')', '')
+              .replaceAll('ą', 'a')
+              .replaceAll('ę', 'e')
+              .replaceAll('ó', 'o')
+              .replaceAll('ś', 's')
+              .replaceAll('ł', 'l')
+              .replaceAll('ż', 'z')
+              .replaceAll('ź', 'z')
+              .replaceAll('ć', 'c')
+              .replaceAll('ń', 'n')
+              .replaceAll('ź', 'z');
+          final newName = oldName.replaceFirst(
+            '.csv',
+            '_${movementSlug}_$side.csv',
+          );
+          final newPath = '$dir/$newName';
+          await file.rename(newPath);
+          renamedPaths.add(newPath);
+        } catch (_) {
+          renamedPaths.add(p);
+        }
+      }
+
       final measurement = Measurement(
         id: DateTime.now().millisecondsSinceEpoch.toString(),
-        movement: _selectedMovement?.name ?? '',
+        movement: movement,
         side: _selectedSide,
         duration: _recordingTime,
         timestamp: DateTime.now().millisecondsSinceEpoch,
+        csvPaths: renamedPaths,
       );
       setState(() {
         _measurements = [..._measurements, measurement];
+        _recordingTime = 0;
       });
       _saveMeasurements();
-      Future.delayed(const Duration(milliseconds: 500), () {
-        if (!mounted) return;
-        setState(() {
-          _recordingTime = 0;
-        });
-      });
+
+      if (renamedPaths.isNotEmpty && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Zapisano ${renamedPaths.length} plik(ów) CSV'),
+            backgroundColor: AppColors.success,
+          ),
+        );
+      }
     } else {
+      // START
+      if (_bleService.isConnected) {
+        try {
+          await _bleService.startIMU();
+        } catch (e) {
+          if (mounted) {
+            ScaffoldMessenger.of(
+              context,
+            ).showSnackBar(SnackBar(content: Text('Błąd IMU: $e')));
+          }
+          return;
+        }
+      }
       setState(() {
         _recordingTime = 0;
         _isRecording = true;
       });
       _timer?.cancel();
-      _timer = Timer.periodic(const Duration(milliseconds: 10), (timer) {
+      _timer = Timer.periodic(const Duration(milliseconds: 10), (_) {
         setState(() {
-          final next = _recordingTime + 0.01;
-          _recordingTime = double.parse(next.toStringAsFixed(2));
+          _recordingTime = double.parse(
+            (_recordingTime + 0.01).toStringAsFixed(2),
+          );
         });
       });
     }
   }
 
-  Future<void> _confirmDeleteMeasurement(Measurement measurement) async {
-    final result = await showDialog<bool>(
+  // ── Rozłącz / Podłącz ponownie ────────────────────────────────────────────
+  Future<void> _reconnect() async {
+    if (_pairedDeviceId.isEmpty) {
+      await _openPairing();
+      return;
+    }
+    if (_bleService.isConnected) {
+      await _bleService.disconnect();
+    } else {
+      try {
+        await _bleService.connect(_pairedDeviceId);
+        await _bleService.initializeBoard();
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Ponownie połączono!'),
+              backgroundColor: AppColors.success,
+            ),
+          );
+        }
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(
+            context,
+          ).showSnackBar(SnackBar(content: Text('Błąd połączenia: $e')));
+        }
+      }
+    }
+  }
+
+  Future<void> _confirmDeleteMeasurement(Measurement m) async {
+    final ok = await showDialog<bool>(
       context: context,
-      builder: (context) {
-        return AlertDialog(
-          title: const Text('Czy na pewno usunąć?'),
-          content: const Text(
-            'Ta operacja jest nieodwracalna. Pomiar zostanie trwale usunięty.',
+      builder: (_) => AlertDialog(
+        title: const Text('Czy na pewno usunąć?'),
+        content: const Text('Ta operacja jest nieodwracalna.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Nie'),
           ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(context).pop(false),
-              child: const Text('Nie'),
-            ),
-            TextButton(
-              onPressed: () => Navigator.of(context).pop(true),
-              child: const Text('Tak'),
-            ),
-          ],
-        );
-      },
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Tak'),
+          ),
+        ],
+      ),
     );
-    if (result == true) {
-      setState(() {
-        _measurements =
-            _measurements.where((m) => m.id != measurement.id).toList();
-      });
+    if (ok == true) {
+      setState(
+        () => _measurements = _measurements.where((x) => x.id != m.id).toList(),
+      );
       _saveMeasurements();
     }
   }
 
   Future<void> _confirmDeleteAll() async {
-    final result = await showDialog<bool>(
+    final ok = await showDialog<bool>(
       context: context,
-      builder: (context) {
-        return AlertDialog(
-          title: const Text('Czy na pewno usunąć wszystkie pomiary?'),
-          content: const Text(
-            'Ta operacja jest nieodwracalna. Wszystkie pomiary zostaną trwale usunięte.',
+      builder: (_) => AlertDialog(
+        title: const Text('Usuń wszystkie pomiary?'),
+        content: const Text('Ta operacja jest nieodwracalna.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Nie'),
           ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(context).pop(false),
-              child: const Text('Nie'),
-            ),
-            TextButton(
-              onPressed: () => Navigator.of(context).pop(true),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
             child: const Text('Tak'),
-            ),
-          ],
-        );
-      },
+          ),
+        ],
+      ),
     );
-    if (result == true) {
-      setState(() {
-        _measurements = [];
-      });
+    if (ok == true) {
+      setState(() => _measurements = []);
       final prefs = await _prefs();
       await prefs.remove('measurements');
     }
@@ -245,78 +437,91 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _exportFile() async {
     if (_measurements.isEmpty) return;
     final buffer = StringBuffer();
-    buffer.writeln('Ruch,Strona,Czas trwania (s),Data');
+    buffer.writeln('Ruch,Strona,Czas (s),Data,Pliki CSV');
     for (final m in _measurements) {
       final date = DateTime.fromMillisecondsSinceEpoch(m.timestamp).toLocal();
       final side = m.side == 'left' ? 'Lewa' : 'Prawa';
       buffer.writeln(
-        '"${m.movement}","$side",${m.duration.toStringAsFixed(2)},"$date"',
+        '"${m.movement}","$side",${m.duration.toStringAsFixed(2)},"$date","${m.csvPaths.join(';')}"',
       );
     }
-    final csv = buffer.toString();
-    final bytes = Uint8List.fromList(utf8.encode(csv));
-    final file = XFile.fromData(
-      bytes,
-      mimeType: 'text/csv',
-      name: 'pomiary_${DateTime.now().millisecondsSinceEpoch}.csv',
+
+    final dirPath = _saveDir.isNotEmpty
+        ? _saveDir
+        : await _bleService.getSaveDir();
+    final dir = Directory(dirPath);
+    if (!await dir.exists()) {
+      await dir.create(recursive: true);
+    }
+
+    final fileName = 'pomiary_${DateTime.now().millisecondsSinceEpoch}.csv';
+    final exportPath = '${dir.path}${Platform.pathSeparator}$fileName';
+    final file = File(exportPath);
+    await file.writeAsString(buffer.toString(), encoding: utf8);
+
+    await SharePlus.instance.share(
+      ShareParams(files: [XFile(file.path, mimeType: 'text/csv')]),
     );
-    await Share.shareXFiles([file]);
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Zapisano eksport CSV: $exportPath'),
+          backgroundColor: AppColors.success,
+        ),
+      );
+    }
   }
 
   Future<void> _logout() async {
     final prefs = await _prefs();
     await prefs.remove('currentUser');
     if (!mounted) return;
-    Navigator.of(context).pushNamedAndRemoveUntil('/login', (route) => false);
+    Navigator.of(context).pushNamedAndRemoveUntil('/login', (_) => false);
   }
 
+  // ── BUILD ─────────────────────────────────────────────────────────────────
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       body: Container(
-        decoration: const BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-            colors: [
-              Color(0xFFE0E7FF),
-              Color(0xFFEDE9FE),
-            ],
-          ),
-        ),
+        decoration: const BoxDecoration(gradient: AppColors.pageGradient),
         child: SafeArea(
           child: LayoutBuilder(
-            builder: (context, constraints) {
-              return SingleChildScrollView(
-                padding: const EdgeInsets.all(16),
-                child: Center(
-                  child: ConstrainedBox(
-                    constraints: const BoxConstraints(maxWidth: 900),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: [
-                        _buildHeaderCard(context),
-                        const SizedBox(height: 16),
-                        _buildMovementCard(context),
-                        const SizedBox(height: 16),
-                        _buildControlCard(context),
-                        if (_measurements.isNotEmpty) ...[
-                          const SizedBox(height: 16),
-                          _buildMeasurementsCard(context),
-                        ],
+            builder: (context, constraints) => SingleChildScrollView(
+              padding: const EdgeInsets.all(16),
+              child: Center(
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 900),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      _buildHeaderCard(),
+                      const SizedBox(height: 12),
+                      _buildSaveDirCard(),
+                      const SizedBox(height: 12),
+                      _buildSensorCard(),
+                      const SizedBox(height: 12),
+                      _buildMovementCard(),
+                      const SizedBox(height: 12),
+                      _buildControlCard(),
+                      if (_measurements.isNotEmpty) ...[
+                        const SizedBox(height: 12),
+                        _buildMeasurementsCard(),
                       ],
-                    ),
+                    ],
                   ),
                 ),
-              );
-            },
+              ),
+            ),
           ),
         ),
       ),
     );
   }
 
-  Widget _buildHeaderCard(BuildContext context) {
+  // ── Header ─────────────────────────────────────────────────────────────────
+  Widget _buildHeaderCard() {
     final name = _currentUser?.name.isNotEmpty == true
         ? _currentUser!.name
         : _currentUser?.email ?? '';
@@ -325,33 +530,98 @@ class _HomeScreenState extends State<HomeScreen> {
       elevation: 2,
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        child: Column(
           children: [
-            Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                const Text(
-                  'Zalogowany jako',
-                  style: TextStyle(
-                    fontSize: 13,
-                    color: Color(0xFF6B7280),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'Zalogowany jako',
+                        style: TextStyle(
+                          fontSize: 13,
+                          color: AppColors.textMuted,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        name,
+                        style: const TextStyle(
+                          fontSize: 15,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ],
                   ),
                 ),
-                const SizedBox(height: 2),
-                Text(
-                  name,
-                  style: const TextStyle(
-                    fontSize: 15,
-                    fontWeight: FontWeight.w600,
-                  ),
+                OutlinedButton.icon(
+                  onPressed: _logout,
+                  icon: const Icon(Icons.logout, size: 18),
+                  label: const Text('Wyloguj'),
                 ),
               ],
             ),
-            OutlinedButton.icon(
-              onPressed: _logout,
-              icon: const Icon(Icons.logout, size: 18),
-              label: const Text('Wyloguj'),
+            const Divider(height: 20),
+            Row(
+              children: [
+                Icon(
+                  _bleService.isConnected
+                      ? Icons.bluetooth_connected
+                      : Icons.bluetooth_disabled,
+                  size: 20,
+                  color: _bleService.isConnected
+                      ? AppColors.primary
+                      : AppColors.textMuted,
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        _pairedDeviceName.isEmpty
+                            ? 'Brak urządzenia'
+                            : _pairedDeviceName,
+                        style: const TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                      if (_pairedDeviceId.isNotEmpty)
+                        Text(
+                          'MAC: $_pairedDeviceId',
+                          style: const TextStyle(
+                            fontSize: 11,
+                            color: AppColors.textMuted,
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 8),
+                ElevatedButton.icon(
+                  onPressed: _isRecording ? null : _reconnect,
+                  icon: Icon(
+                    _bleService.isConnected
+                        ? Icons.bluetooth_disabled
+                        : Icons.bluetooth_searching,
+                    size: 16,
+                  ),
+                  label: Text(_bleService.isConnected ? 'Rozłącz' : 'Połącz'),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: _bleService.isConnected
+                        ? AppColors.danger
+                        : AppColors.primary,
+                    minimumSize: const Size(90, 36),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                  ),
+                ),
+              ],
             ),
           ],
         ),
@@ -359,7 +629,104 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  Widget _buildMovementCard(BuildContext context) {
+  // ── Folder zapisu ──────────────────────────────────────────────────────────
+  Widget _buildSaveDirCard() {
+    return InkWell(
+      onTap: _pickFolder,
+      borderRadius: BorderRadius.circular(12),
+      child: Card(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        elevation: 1,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+          child: Row(
+            children: [
+              const Icon(Icons.folder_open, color: AppColors.warning),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'Folder zapisu CSV',
+                      style: TextStyle(
+                        fontSize: 11,
+                        color: AppColors.textMuted,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      _saveDir.isEmpty ? 'Dotknij aby wybrać...' : _saveDir,
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontFamily: 'monospace',
+                        color: _saveDir.isEmpty
+                            ? AppColors.textSubtle
+                            : AppColors.primaryText,
+                      ),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ],
+                ),
+              ),
+              const Icon(Icons.chevron_right, color: AppColors.textSubtle),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  // ── Karta sensorów na żywo ─────────────────────────────────────────────────
+  Widget _buildSensorCard() {
+    return Card(
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      elevation: 2,
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                Icon(
+                  Icons.sensors,
+                  size: 18,
+                  color: _isRecording ? AppColors.danger : AppColors.textMuted,
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  _isRecording ? '🔴 Dane na żywo' : 'Dane sensorów',
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                    color: _isRecording
+                        ? AppColors.danger
+                        : AppColors.textSecondary,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            Row(
+              children: [
+                Expanded(
+                  child: _SensorTile('ACC [g]', _acc, AppColors.sensorAcc),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: _SensorTile('GYRO [°/s]', _gyro, AppColors.sensorGyro),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // ── Wybór ruchu ───────────────────────────────────────────────────────────
+  Widget _buildMovementCard() {
     return Card(
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
       elevation: 2,
@@ -371,10 +738,7 @@ class _HomeScreenState extends State<HomeScreen> {
             const Text(
               'Wybierz ruch',
               textAlign: TextAlign.center,
-              style: TextStyle(
-                fontSize: 18,
-                fontWeight: FontWeight.w600,
-              ),
+              style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
             ),
             const SizedBox(height: 16),
             GridView.builder(
@@ -387,24 +751,24 @@ class _HomeScreenState extends State<HomeScreen> {
                 childAspectRatio: 0.9,
               ),
               itemCount: _movements.length,
-              itemBuilder: (context, index) {
-                final movement = _movements[index];
-                final selected = _selectedMovement?.id == movement.id;
+              itemBuilder: (_, index) {
+                final mv = _movements[index];
+                final selected = _selectedMovement?.id == mv.id;
                 return InkWell(
-                  onTap: () {
-                    setState(() {
-                      _selectedMovement = movement;
-                    });
-                  },
+                  onTap: _isRecording
+                      ? null
+                      : () => setState(() => _selectedMovement = mv),
                   borderRadius: BorderRadius.circular(14),
                   child: AnimatedContainer(
                     duration: const Duration(milliseconds: 150),
                     padding: const EdgeInsets.all(10),
                     decoration: BoxDecoration(
-                      color: selected ? const Color(0xFFDBEAFE) : Colors.white,
+                      color: selected
+                          ? AppColors.primarySoft
+                          : AppColors.surface,
                       borderRadius: BorderRadius.circular(14),
                       border: Border.all(
-                        color: selected ? const Color(0xFF3B82F6) : const Color(0xFFE5E7EB),
+                        color: selected ? AppColors.primary : AppColors.border,
                         width: selected ? 2 : 1,
                       ),
                     ),
@@ -414,19 +778,19 @@ class _HomeScreenState extends State<HomeScreen> {
                         Expanded(
                           child: FittedBox(
                             child: Icon(
-                              movement.icon,
-                              color: const Color(0xFF4B5563),
+                              mv.icon,
+                              color: AppColors.textSecondary,
                             ),
                           ),
                         ),
                         const SizedBox(height: 8),
                         Text(
-                          movement.name,
+                          mv.name,
                           textAlign: TextAlign.center,
                           style: const TextStyle(
                             fontSize: 11,
                             fontWeight: FontWeight.w500,
-                            color: Color(0xFF374151),
+                            color: AppColors.textSecondary,
                           ),
                         ),
                       ],
@@ -441,8 +805,8 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  Widget _buildControlCard(BuildContext context) {
-    final isRecording = _isRecording;
+  // ── Kontrolki nagrywania ──────────────────────────────────────────────────
+  Widget _buildControlCard() {
     return Card(
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
       elevation: 2,
@@ -451,24 +815,99 @@ class _HomeScreenState extends State<HomeScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
+            // Wybrany ruch + strona info
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: AppColors.primarySoft,
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Column(
+                children: [
+                  const Text(
+                    'Aktualna konfiguracja:',
+                    style: TextStyle(fontSize: 13, color: AppColors.textMuted),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    '${_selectedMovement?.name ?? ''} — ${_selectedSide == 'left' ? 'Lewa' : 'Prawa'}',
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600,
+                      color: AppColors.primaryText,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 12),
+
+            // Strona
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton(
+                    onPressed: _isRecording
+                        ? null
+                        : () => setState(() => _selectedSide = 'left'),
+                    style: OutlinedButton.styleFrom(
+                      backgroundColor: _selectedSide == 'left'
+                          ? AppColors.primary
+                          : AppColors.surface,
+                      foregroundColor: _selectedSide == 'left'
+                          ? Colors.white
+                          : AppColors.textPrimary,
+                    ),
+                    child: const Text('Lewa'),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: OutlinedButton(
+                    onPressed: _isRecording
+                        ? null
+                        : () => setState(() => _selectedSide = 'right'),
+                    style: OutlinedButton.styleFrom(
+                      backgroundColor: _selectedSide == 'right'
+                          ? AppColors.primary
+                          : AppColors.surface,
+                      foregroundColor: _selectedSide == 'right'
+                          ? Colors.white
+                          : AppColors.textPrimary,
+                    ),
+                    child: const Text('Prawa'),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 14),
+
+            // Start / Stop
             ElevatedButton.icon(
               onPressed: _toggleRecording,
               style: ElevatedButton.styleFrom(
-                backgroundColor: isRecording ? const Color(0xFFEF4444) : const Color(0xFF22C55E),
+                backgroundColor: _isRecording
+                    ? AppColors.danger
+                    : AppColors.success,
                 minimumSize: const Size.fromHeight(56),
                 shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(14),
                 ),
               ),
-              icon: Icon(isRecording ? Icons.stop : Icons.play_arrow),
-              label: Text(isRecording ? 'Zakończ ruch' : 'Rozpocznij ruch'),
+              icon: Icon(_isRecording ? Icons.stop : Icons.play_arrow),
+              label: Text(_isRecording ? 'Zakończ ruch' : 'Rozpocznij ruch'),
             ),
-            if (isRecording) ...[
+
+            if (_isRecording) ...[
               const SizedBox(height: 12),
               Container(
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 8,
+                ),
                 decoration: BoxDecoration(
-                  color: const Color(0xFFFEE2E2),
+                  color: AppColors.dangerSoft,
                   borderRadius: BorderRadius.circular(999),
                 ),
                 child: Row(
@@ -477,106 +916,20 @@ class _HomeScreenState extends State<HomeScreen> {
                     const Text('🔴 NAGRYWANIE: '),
                     Text(
                       _formatTime(_recordingTime),
-                      style: const TextStyle(
-                        fontWeight: FontWeight.w600,
-                      ),
+                      style: const TextStyle(fontWeight: FontWeight.w600),
                     ),
                   ],
                 ),
               ),
             ],
-            const SizedBox(height: 20),
-            Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                const Text(
-                  'Strona',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                    fontSize: 15,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-                const SizedBox(height: 8),
-                Row(
-                  children: [
-                    Expanded(
-                      child: OutlinedButton(
-                        onPressed: isRecording
-                            ? null
-                            : () {
-                                setState(() {
-                                  _selectedSide = 'left';
-                                });
-                              },
-                        style: OutlinedButton.styleFrom(
-                          backgroundColor:
-                              _selectedSide == 'left' ? const Color(0xFF3B82F6) : Colors.white,
-                          foregroundColor:
-                              _selectedSide == 'left' ? Colors.white : const Color(0xFF111827),
-                        ),
-                        child: const Text('Lewa'),
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: OutlinedButton(
-                        onPressed: isRecording
-                            ? null
-                            : () {
-                                setState(() {
-                                  _selectedSide = 'right';
-                                });
-                              },
-                        style: OutlinedButton.styleFrom(
-                          backgroundColor:
-                              _selectedSide == 'right' ? const Color(0xFF3B82F6) : Colors.white,
-                          foregroundColor:
-                              _selectedSide == 'right' ? Colors.white : const Color(0xFF111827),
-                        ),
-                        child: const Text('Prawa'),
-                      ),
-                    ),
-                  ],
-                ),
-              ],
-            ),
-            const SizedBox(height: 16),
-            Container(
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: const Color(0xFFDBEAFE),
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.center,
-                children: [
-                  const Text(
-                    'Aktualna konfiguracja:',
-                    style: TextStyle(
-                      fontSize: 13,
-                      color: Color(0xFF6B7280),
-                    ),
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    '${_selectedMovement?.name ?? ''} - ${_selectedSide == 'left' ? 'Lewa' : 'Prawa'}',
-                    style: const TextStyle(
-                      fontSize: 14,
-                      fontWeight: FontWeight.w600,
-                      color: Color(0xFF1D4ED8),
-                    ),
-                  ),
-                ],
-              ),
-            ),
           ],
         ),
       ),
     );
   }
 
-  Widget _buildMeasurementsCard(BuildContext context) {
+  // ── Lista pomiarów ─────────────────────────────────────────────────────────
+  Widget _buildMeasurementsCard() {
     final reversed = _measurements.reversed.toList();
     return Card(
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
@@ -589,26 +942,26 @@ class _HomeScreenState extends State<HomeScreen> {
             const Text(
               'Ostatnie pomiary',
               textAlign: TextAlign.center,
-              style: TextStyle(
-                fontSize: 18,
-                fontWeight: FontWeight.w600,
-              ),
+              style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
             ),
             const SizedBox(height: 12),
             SizedBox(
               height: 320,
               child: ListView.builder(
                 itemCount: reversed.length,
-                itemBuilder: (context, index) {
+                itemBuilder: (_, index) {
                   final m = reversed[index];
                   final side = m.side == 'left' ? 'Lewa' : 'Prawa';
+                  final date = DateTime.fromMillisecondsSinceEpoch(
+                    m.timestamp,
+                  ).toLocal();
                   return Container(
                     margin: const EdgeInsets.only(bottom: 8),
                     padding: const EdgeInsets.all(12),
                     decoration: BoxDecoration(
-                      color: Colors.white,
+                      color: AppColors.surface,
                       borderRadius: BorderRadius.circular(12),
-                      border: Border.all(color: const Color(0xFFE5E7EB)),
+                      border: Border.all(color: AppColors.border),
                     ),
                     child: Row(
                       children: [
@@ -617,7 +970,7 @@ class _HomeScreenState extends State<HomeScreen> {
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
                               Text(
-                                '${m.movement} - $side',
+                                '${m.movement} — $side',
                                 style: const TextStyle(
                                   fontSize: 14,
                                   fontWeight: FontWeight.w600,
@@ -625,12 +978,24 @@ class _HomeScreenState extends State<HomeScreen> {
                               ),
                               const SizedBox(height: 4),
                               Text(
-                                'Czas trwania: ${m.duration.toStringAsFixed(2)}s',
+                                'Czas: ${m.duration.toStringAsFixed(2)}s  •  $date',
                                 style: const TextStyle(
-                                  fontSize: 12,
-                                  color: Color(0xFF6B7280),
+                                  fontSize: 11,
+                                  color: AppColors.textMuted,
                                 ),
                               ),
+                              if (m.csvPaths.isNotEmpty)
+                                Padding(
+                                  padding: const EdgeInsets.only(top: 4),
+                                  child: Text(
+                                    '💾 ${m.csvPaths.map((p) => p.split('/').last).join('\n💾 ')}',
+                                    style: const TextStyle(
+                                      fontSize: 10,
+                                      color: AppColors.primaryText,
+                                      fontFamily: 'monospace',
+                                    ),
+                                  ),
+                                ),
                             ],
                           ),
                         ),
@@ -638,7 +1003,7 @@ class _HomeScreenState extends State<HomeScreen> {
                         OutlinedButton.icon(
                           onPressed: () => _confirmDeleteMeasurement(m),
                           style: OutlinedButton.styleFrom(
-                            foregroundColor: const Color(0xFFB91C1C),
+                            foregroundColor: AppColors.dangerText,
                           ),
                           icon: const Icon(Icons.delete_outline, size: 18),
                           label: const Text('Usuń'),
@@ -652,11 +1017,11 @@ class _HomeScreenState extends State<HomeScreen> {
             if (_measurements.length > 5) ...[
               const SizedBox(height: 4),
               Text(
-                'Przewiń w dół, aby zobaczyć więcej (${_measurements.length} pomiarów)',
+                'Przewiń, aby zobaczyć więcej (${_measurements.length} pomiarów)',
                 textAlign: TextAlign.center,
                 style: const TextStyle(
                   fontSize: 11,
-                  color: Color(0xFF6B7280),
+                  color: AppColors.textMuted,
                 ),
               ),
             ],
@@ -664,7 +1029,7 @@ class _HomeScreenState extends State<HomeScreen> {
             ElevatedButton.icon(
               onPressed: _confirmDeleteAll,
               style: ElevatedButton.styleFrom(
-                backgroundColor: const Color(0xFFDC2626),
+                backgroundColor: AppColors.danger,
                 minimumSize: const Size.fromHeight(48),
                 shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(14),
@@ -680,10 +1045,86 @@ class _HomeScreenState extends State<HomeScreen> {
                 minimumSize: const Size.fromHeight(48),
               ),
               icon: const Icon(Icons.download),
-              label: const Text('Eksportuj plik'),
+              label: const Text('Eksportuj plik CSV'),
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Widget do wyświetlania danych sensora
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _SensorTile extends StatelessWidget {
+  final String label;
+  final SensorSample? data;
+  final Color color;
+  const _SensorTile(this.label, this.data, this.color);
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 200),
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: data != null ? 0.08 : 0.03),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(
+          color: data != null ? color : AppColors.border,
+          width: data != null ? 1.5 : 1,
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            label,
+            style: TextStyle(
+              color: color,
+              fontSize: 12,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          const SizedBox(height: 6),
+          if (data == null)
+            Text(
+              '— — —',
+              style: TextStyle(color: AppColors.textSubtle, fontSize: 12),
+            )
+          else ...[
+            _axisRow('X', data!.x, color),
+            _axisRow('Y', data!.y, color),
+            _axisRow('Z', data!.z, color),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _axisRow(String axis, double val, Color c) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 1),
+      child: Row(
+        children: [
+          Text(
+            '$axis ',
+            style: TextStyle(
+              color: c,
+              fontSize: 11,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          Expanded(
+            child: Text(
+              val.toStringAsFixed(3),
+              style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
+              textAlign: TextAlign.right,
+            ),
+          ),
+        ],
       ),
     );
   }

@@ -1,315 +1,368 @@
+import 'dart:async';
+import 'dart:io';
+
 import 'package:flutter/material.dart';
+import 'package:flutter_blue_plus/flutter_blue_plus.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'package:frontend_dataforninjafruit/models/metawear_device.dart';
+import 'package:frontend_dataforninjafruit/services/metawear_service.dart';
+import 'package:frontend_dataforninjafruit/services/metawear_protocol.dart';
+import 'package:frontend_dataforninjafruit/theme/app_theme.dart';
+
 class BluetoothPairingScreen extends StatefulWidget {
-  const BluetoothPairingScreen({super.key});
+  final MetaWearService? service;
+
+  const BluetoothPairingScreen({super.key, this.service});
 
   @override
   State<BluetoothPairingScreen> createState() => _BluetoothPairingScreenState();
 }
 
 class _BluetoothPairingScreenState extends State<BluetoothPairingScreen> {
-  bool _isConnecting = false;
-  bool _isConnected = false;
-  bool _isSimulationMode = false;
-  String _error = '';
-  String _deviceName = '';
-  String? _selectedSensor;
+  late final MetaWearService _service;
+  final List<MetawearDevice> _devices = [];
+  bool _isScanning = false;
+  StreamSubscription? _scanSubscription;
 
-  Future<SharedPreferences> _prefs() {
-    return SharedPreferences.getInstance();
-  }
-
-  Future<void> _handleConnect() async {
-    if (_selectedSensor == null || _isConnecting || _isConnected) {
-      return;
-    }
-    setState(() {
-      _isConnecting = true;
-      _error = '';
+  @override
+  void initState() {
+    super.initState();
+    _service = widget.service ?? MetaWearService();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _requestPermissionsAndScan();
     });
-    final prefs = await _prefs();
-    await prefs.setString('selectedSensor', _selectedSensor!);
-    setState(() {
-      _isSimulationMode = true;
-    });
-    await Future.delayed(const Duration(milliseconds: 1500));
-    if (!mounted) return;
-    setState(() {
-      _deviceName = 'MetaMotion ${_selectedSensor!} (Symulacja)';
-      _isConnected = true;
-      _isConnecting = false;
-    });
-    await Future.delayed(const Duration(seconds: 2));
-    if (!mounted) return;
-    Navigator.of(context).pushNamedAndRemoveUntil('/home', (route) => false);
   }
 
   @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      body: Container(
-        decoration: const BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topRight,
-            end: Alignment.bottomLeft,
-            colors: [
-              Color(0xFFF5F3FF),
-              Color(0xFFFCE7F3),
-            ],
-          ),
-        ),
-        child: SafeArea(
-          child: Center(
-            child: Padding(
-              padding: const EdgeInsets.all(16),
-              child: ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: 448),
-                child: Card(
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(20),
-                  ),
-                  child: Padding(
-                    padding: const EdgeInsets.all(20),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: [
-                        const SizedBox(height: 8),
-                        Center(
-                          child: Container(
-                            padding: const EdgeInsets.all(16),
-                            decoration: BoxDecoration(
-                              color: _isConnected
-                                  ? const Color(0xFF22C55E)
-                                  : const Color(0xFF3B82F6),
-                              shape: BoxShape.circle,
-                            ),
-                            child: Icon(
-                              _isConnected ? Icons.check : Icons.bluetooth,
-                              color: Colors.white,
-                              size: 30,
-                            ),
-                          ),
-                        ),
-                        const SizedBox(height: 12),
-                        Text(
-                          _isConnected ? 'Połączono pomyślnie!' : 'Parowanie z MetaMotion',
-                          textAlign: TextAlign.center,
-                          style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                                fontWeight: FontWeight.w600,
-                              ),
-                        ),
-                        const SizedBox(height: 4),
-                        Text(
-                          _isConnected
-                              ? 'Przekierowywanie do aplikacji...'
-                              : 'Połącz się z czujnikiem przez Bluetooth',
-                          textAlign: TextAlign.center,
-                          style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                                color: const Color(0xFF6B7280),
-                              ),
-                        ),
-                        const SizedBox(height: 20),
-                        if (!_isConnected) ...[
-                          Container(
-                            padding: const EdgeInsets.all(12),
-                            decoration: BoxDecoration(
-                              color: const Color(0xFFE0E7FF),
-                              borderRadius: BorderRadius.circular(14),
-                              border: Border.all(color: const Color(0xFF818CF8)),
-                            ),
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.stretch,
-                              children: [
-                                const Text(
-                                  'Z jakiego czujnika MetaMotion korzystasz?',
-                                  textAlign: TextAlign.center,
-                                  style: TextStyle(
-                                    fontSize: 15,
-                                    fontWeight: FontWeight.w600,
-                                  ),
-                                ),
-                                const SizedBox(height: 10),
-                                Row(
-                                  children: [
-                                    for (final sensor in ['RL', 'S', 'C'])
-                                      Expanded(
-                                        child: Padding(
-                                          padding: const EdgeInsets.symmetric(horizontal: 4),
-                                          child: InkWell(
-                                            onTap: _isConnecting
-                                                ? null
-                                                : () {
-                                                    setState(() {
-                                                      _selectedSensor = sensor;
-                                                    });
-                                                  },
-                                            borderRadius: BorderRadius.circular(12),
-                                            child: AnimatedContainer(
-                                              duration: const Duration(milliseconds: 150),
-                                              padding: const EdgeInsets.symmetric(
-                                                vertical: 16,
-                                              ),
-                                              decoration: BoxDecoration(
-                                                color: _selectedSensor == sensor
-                                                    ? const Color(0xFFDBEAFE)
-                                                    : Colors.white,
-                                                borderRadius: BorderRadius.circular(12),
-                                                border: Border.all(
-                                                  color: _selectedSensor == sensor
-                                                      ? const Color(0xFF3B82F6)
-                                                      : const Color(0xFFD1D5DB),
-                                                  width: 2,
-                                                ),
-                                              ),
-                                              child: Center(
-                                                child: Text(
-                                                  sensor,
-                                                  style: const TextStyle(
-                                                    fontSize: 16,
-                                                    fontWeight: FontWeight.w600,
-                                                    color: Color(0xFF374151),
-                                                  ),
-                                                ),
-                                              ),
-                                            ),
-                                          ),
-                                        ),
-                                      ),
-                                  ],
-                                ),
-                              ],
-                            ),
-                          ),
-                          const SizedBox(height: 12),
-                          Container(
-                            padding: const EdgeInsets.all(12),
-                            decoration: BoxDecoration(
-                              color: const Color(0xFFDBEAFE),
-                              borderRadius: BorderRadius.circular(14),
-                              border: Border.all(color: const Color(0xFFBFDBFE)),
-                            ),
-                            child: const Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text(
-                                  'Upewnij się, że:',
-                                  style: TextStyle(
-                                    fontWeight: FontWeight.w600,
-                                  ),
-                                ),
-                                SizedBox(height: 4),
-                                Text('• MetaMotion jest włączony'),
-                                Text('• Urządzenie jest w pobliżu'),
-                                Text('• Bluetooth w telefonie jest włączony'),
-                              ],
-                            ),
-                          ),
-                          if (_isSimulationMode && !_isConnected && _error.isEmpty) ...[
-                            const SizedBox(height: 12),
-                            Container(
-                              padding: const EdgeInsets.all(12),
-                              decoration: BoxDecoration(
-                                color: const Color(0xFFFEF3C7),
-                                borderRadius: BorderRadius.circular(14),
-                                border: Border.all(color: const Color(0xFFFCD34D)),
-                              ),
-                              child: const Text(
-                                'Tryb demonstracyjny: aplikacja działa w trybie symulacji połączenia.',
-                                style: TextStyle(
-                                  fontSize: 13,
-                                  color: Color(0xFF92400E),
-                                ),
-                              ),
-                            ),
-                          ],
-                          if (_error.isNotEmpty) ...[
-                            const SizedBox(height: 12),
-                            Container(
-                              padding: const EdgeInsets.all(12),
-                              decoration: BoxDecoration(
-                                color: const Color(0xFFFEE2E2),
-                                borderRadius: BorderRadius.circular(14),
-                                border: Border.all(color: const Color(0xFFFCA5A5)),
-                              ),
-                              child: Text(
-                                _error,
-                                style: const TextStyle(
-                                  fontSize: 13,
-                                  color: Color(0xFFB91C1C),
-                                ),
-                              ),
-                            ),
-                          ],
-                          const SizedBox(height: 16),
-                          if (_selectedSensor != null)
-                            ElevatedButton.icon(
-                              onPressed: _handleConnect,
-                              icon: _isConnecting
-                                  ? const SizedBox(
-                                      width: 18,
-                                      height: 18,
-                                      child: CircularProgressIndicator(
-                                        strokeWidth: 2,
-                                        valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
-                                      ),
-                                    )
-                                  : const Icon(Icons.bluetooth),
-                              label: Text(
-                                _isConnecting
-                                    ? 'Łączenie...'
-                                    : 'Połącz z MetaMotion ${_selectedSensor!}',
-                              ),
-                            ),
-                        ],
-                        if (_isConnected && _deviceName.isNotEmpty) ...[
-                          const SizedBox(height: 12),
-                          Container(
-                            padding: const EdgeInsets.all(12),
-                            decoration: BoxDecoration(
-                              color: const Color(0xFFDCFCE7),
-                              borderRadius: BorderRadius.circular(14),
-                              border: Border.all(color: const Color(0xFF6EE7B7)),
-                            ),
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.center,
-                              children: [
-                                Text(
-                                  'Połączono z: $_deviceName',
-                                  textAlign: TextAlign.center,
-                                  style: const TextStyle(
-                                    fontSize: 14,
-                                    fontWeight: FontWeight.w600,
-                                    color: Color(0xFF166534),
-                                  ),
-                                ),
-                                if (_isSimulationMode)
-                                  const Padding(
-                                    padding: EdgeInsets.only(top: 4),
-                                    child: Text(
-                                      '(Tryb symulacji)',
-                                      style: TextStyle(
-                                        fontSize: 11,
-                                        color: Color(0xFFCA8A04),
-                                      ),
-                                    ),
-                                  ),
-                              ],
-                            ),
-                          ),
-                        ],
-                      ],
-                    ),
-                  ),
+  void dispose() {
+    _scanSubscription?.cancel();
+    FlutterBluePlus.stopScan();
+    super.dispose();
+  }
+
+  Future<void> _requestPermissionsAndScan() async {
+    if (Platform.isAndroid) {
+      await [
+        Permission.bluetoothScan,
+        Permission.bluetoothConnect,
+        Permission.locationWhenInUse,
+      ].request();
+    }
+    _startScan();
+  }
+
+  Future<void> _startScan() async {
+    if (_isScanning) return;
+    setState(() {
+      _devices.clear();
+      _isScanning = true;
+    });
+
+    try {
+      await FlutterBluePlus.stopScan();
+      _scanSubscription?.cancel();
+
+      _scanSubscription = FlutterBluePlus.scanResults.listen((results) {
+        for (final r in results) {
+          if (!mounted) return;
+          final name = r.device.platformName;
+          final uuids = r.advertisementData.serviceUuids
+              .map((u) => u.toString().toLowerCase())
+              .toList();
+          final isMetaWear =
+              name.toLowerCase().contains('metawear') ||
+              name.toLowerCase().contains('metamotion') ||
+              uuids.contains(kServiceUuid.toLowerCase());
+          if (isMetaWear &&
+              !_devices.any((d) => d.id == r.device.remoteId.str)) {
+            setState(() {
+              _devices.add(
+                MetawearDevice(
+                  id: r.device.remoteId.str,
+                  name: name.isEmpty
+                      ? 'MetaWear (${r.device.remoteId.str})'
+                      : name,
+                  rssi: r.rssi,
                 ),
-              ),
+              );
+            });
+          }
+        }
+      });
+
+      await FlutterBluePlus.startScan(
+        withServices: [Guid(kServiceUuid)],
+        timeout: const Duration(seconds: 12),
+      );
+
+      await Future.delayed(const Duration(seconds: 13));
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Błąd skanowania: $e')));
+      }
+    } finally {
+      if (mounted) setState(() => _isScanning = false);
+    }
+  }
+
+  Future<void> _connect(MetawearDevice device) async {
+    if (!mounted) return;
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => const Center(
+        child: Card(
+          child: Padding(
+            padding: EdgeInsets.all(24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                CircularProgressIndicator(),
+                SizedBox(height: 16),
+                Text('Łączenie z MetaWear...'),
+              ],
             ),
           ),
         ),
       ),
     );
+
+    try {
+      await _service.connect(device.id);
+      await _service.initializeBoard();
+
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('pairedDeviceName', device.name);
+      await prefs.setString('pairedDeviceId', device.id);
+      await prefs.setString('pairedDeviceType', 'MetaMotion');
+
+      if (!mounted) return;
+      Navigator.of(context, rootNavigator: true).pop();
+
+      if (Navigator.of(context).canPop()) {
+        Navigator.of(context).pop(_service);
+      } else {
+        Navigator.of(
+          context,
+        ).pushNamedAndRemoveUntil('/home', (_) => false, arguments: _service);
+      }
+    } catch (e) {
+      if (mounted) {
+        Navigator.of(context, rootNavigator: true).pop();
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Błąd połączenia: $e')));
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Wybierz MetaWear'),
+        actions: [
+          if (_isScanning)
+            const Center(
+              child: Padding(
+                padding: EdgeInsets.all(16),
+                child: SizedBox(
+                  width: 20,
+                  height: 20,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
+              ),
+            )
+          else
+            IconButton(
+              icon: const Icon(Icons.refresh),
+              tooltip: 'Skanuj ponownie',
+              onPressed: _startScan,
+            ),
+        ],
+      ),
+      body: Container(
+        decoration: const BoxDecoration(gradient: AppColors.pageGradient),
+        child: Column(
+          children: [
+            // // ── Folder zapisu ──────────────────────────────────────────────
+            // Padding(
+            //   padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+            //   child: InkWell(
+            //     onTap: _pickFolder,
+            //     borderRadius: BorderRadius.circular(12),
+            //     child: Container(
+            //       padding: const EdgeInsets.symmetric(
+            //         horizontal: 14,
+            //         vertical: 12,
+            //       ),
+            //       decoration: BoxDecoration(
+            //         color: Colors.white,
+            //         borderRadius: BorderRadius.circular(12),
+            //         border: Border.all(color: const Color(0xFFE5E7EB)),
+            //         boxShadow: [
+            //           BoxShadow(
+            //             color: Colors.black.withValues(alpha: .04),
+            //             // color: Colors.black.withOpacity(0.04),
+            //             blurRadius: 6,
+            //             offset: const Offset(0, 2),
+            //           ),
+            //         ],
+            //       ),
+            //       child: Row(
+            //         children: [
+            //           const Icon(Icons.folder_open, color: Colors.amber),
+            //           const SizedBox(width: 12),
+            //           Expanded(
+            //             child: Column(
+            //               crossAxisAlignment: CrossAxisAlignment.start,
+            //               children: [
+            //                 const Text(
+            //                   'Folder zapisu CSV',
+            //                   style: TextStyle(
+            //                     fontSize: 11,
+            //                     color: Color(0xFF6B7280),
+            //                   ),
+            //                 ),
+            //                 const SizedBox(height: 2),
+            //                 Text(
+            //                   _saveDir.isEmpty
+            //                       ? 'Dotknij aby wybrać...'
+            //                       : _saveDir,
+            //                   style: TextStyle(
+            //                     fontSize: 12,
+            //                     fontFamily: 'monospace',
+            //                     color: _saveDir.isEmpty
+            //                         ? const Color(0xFF9CA3AF)
+            //                         : const Color(0xFF1D4ED8),
+            //                   ),
+            //                   overflow: TextOverflow.ellipsis,
+            //                 ),
+            //               ],
+            //             ),
+            //           ),
+            //           const Icon(Icons.chevron_right, color: Color(0xFF9CA3AF)),
+            //         ],
+            //       ),
+            //     ),
+            //   ),
+            // ),
+
+            // const SizedBox(height: 10),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: Text(
+                'Wybierz urządzenie z listy',
+                textAlign: TextAlign.center,
+                style: const TextStyle(
+                  fontSize: 13,
+                  color: AppColors.textSecondary,
+                ),
+              ),
+            ),
+            const SizedBox(height: 4),
+
+            // ── Lista urządzeń ─────────────────────────────────────────────
+            Expanded(
+              child: _devices.isEmpty
+                  ? Center(
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Icon(
+                            _isScanning
+                                ? Icons.bluetooth_searching
+                                : Icons.bluetooth_disabled,
+                            size: 64,
+                            color: AppColors.textMuted,
+                          ),
+                          const SizedBox(height: 16),
+                          Text(
+                            _isScanning
+                                ? 'Skanowanie...'
+                                : 'Nie znaleziono urządzeń',
+                            style: const TextStyle(color: AppColors.textMuted),
+                          ),
+                          if (!_isScanning) ...[
+                            const SizedBox(height: 12),
+                            ElevatedButton.icon(
+                              onPressed: _startScan,
+                              icon: const Icon(Icons.refresh),
+                              label: const Text('Skanuj ponownie'),
+                            ),
+                          ],
+                        ],
+                      ),
+                    )
+                  : ListView.builder(
+                      padding: const EdgeInsets.all(12),
+                      itemCount: _devices.length,
+                      itemBuilder: (context, index) {
+                        final device = _devices[index];
+                        return Card(
+                          elevation: 2,
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(14),
+                          ),
+                          margin: const EdgeInsets.symmetric(
+                            vertical: 6,
+                            horizontal: 4,
+                          ),
+                          child: ListTile(
+                            contentPadding: const EdgeInsets.symmetric(
+                              horizontal: 16,
+                              vertical: 8,
+                            ),
+                            leading: const CircleAvatar(
+                              backgroundColor: AppColors.primarySoft,
+                              child: Icon(
+                                Icons.bluetooth,
+                                color: AppColors.primary,
+                              ),
+                            ),
+                            title: Text(
+                              device.name,
+                              style: const TextStyle(
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                            subtitle: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text('MAC: ${device.id}'),
+                                Text(
+                                  'Sygnał: ${device.rssi} dBm',
+                                  style: const TextStyle(
+                                    fontSize: 11,
+                                    color: AppColors.textMuted,
+                                  ),
+                                ),
+                              ],
+                            ),
+                            trailing: ElevatedButton(
+                              onPressed: () => _connect(device),
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: AppColors.primary,
+                                foregroundColor: Colors.white,
+                                minimumSize: const Size(80, 36),
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(10),
+                                ),
+                              ),
+                              child: const Text('Połącz'),
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 }
-
-
