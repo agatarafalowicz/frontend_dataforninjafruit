@@ -1,7 +1,8 @@
-import 'dart:async';
+﻿import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:archive/archive.dart';
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:permission_handler/permission_handler.dart';
@@ -80,6 +81,7 @@ class _HomeScreenState extends State<HomeScreen> {
   late MetaWearService _bleService;
   StreamSubscription? _accSub;
   StreamSubscription? _gyroSub;
+  StreamSubscription<bool>? _connectionSub;
 
   // ── Dane z sensorów ────────────────────────────────────────────────────────
   SensorSample? _acc;
@@ -125,26 +127,36 @@ class _HomeScreenState extends State<HomeScreen> {
     _selectedMovement = _movements.first;
     _bleService = MetaWearService();
     _subscribeSensors();
+    _subscribeConnectionState();
     _loadSaveDir();
 
-    // Pobierz serwis przekazany z nawigacji, jeśli ekran został otwarty po parowaniu.
-    WidgetsBinding.instance.addPostFrameCallback((_) {
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
       final args = ModalRoute.of(context)?.settings.arguments;
-      if (args is MetaWearService && !identical(args, _bleService)) {
+      if (args is Map<String, dynamic>) {
+        _applyPairingResult(args);
+      } else if (args is MetaWearService && !identical(args, _bleService)) {
         _attachBleService(args);
+      }
+
+      await _clearStoredPairedDevice();
+
+      if (!mounted) return;
+      if (!_bleService.isConnected) {
+        await _openPairing();
       }
     });
 
     _loadCurrentUser();
-    _loadPairedDevice();
     _loadMeasurements();
   }
 
   void _attachBleService(MetaWearService service) {
     _accSub?.cancel();
     _gyroSub?.cancel();
+    _connectionSub?.cancel();
     _bleService = service;
     _subscribeSensors();
+    _subscribeConnectionState();
     _loadSaveDir();
   }
 
@@ -153,11 +165,25 @@ class _HomeScreenState extends State<HomeScreen> {
     _gyroSub = _bleService.gyroStream.listen((s) => setState(() => _gyro = s));
   }
 
+  void _subscribeConnectionState() {
+    _connectionSub = _bleService.connectionStateStream.listen((connected) {
+      if (!mounted) return;
+      setState(() {
+        if (!connected && _isRecording) {
+          _isRecording = false;
+          _recordingTime = 0;
+          _timer?.cancel();
+        }
+      });
+    });
+  }
+
   @override
   void dispose() {
     _timer?.cancel();
     _accSub?.cancel();
     _gyroSub?.cancel();
+    _connectionSub?.cancel();
     if (_isRecording) _bleService.stopIMU();
     super.dispose();
   }
@@ -183,7 +209,7 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _openPairing() async {
-    final result = await Navigator.of(context).push<MetaWearService>(
+    final result = await Navigator.of(context).push<Map<String, dynamic>>(
       MaterialPageRoute(
         builder: (_) => BluetoothPairingScreen(service: _bleService),
       ),
@@ -193,16 +219,40 @@ class _HomeScreenState extends State<HomeScreen> {
       return;
     }
 
-    if (!identical(result, _bleService)) {
-      _attachBleService(result);
-    }
+    _applyPairingResult(result);
 
-    await _loadPairedDevice();
     if (mounted) {
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(const SnackBar(content: Text('Parowanie zakończone.')));
     }
+  }
+
+  void _applyPairingResult(Map<String, dynamic> result) {
+    final service = result['service'];
+    final deviceName = (result['deviceName'] as String?) ?? '';
+    final deviceId = (result['deviceId'] as String?) ?? '';
+
+    if (service is MetaWearService && !identical(service, _bleService)) {
+      _attachBleService(service);
+    }
+
+    if (mounted) {
+      setState(() {
+        _pairedDeviceName = deviceName;
+        _pairedDeviceId = deviceId;
+      });
+    } else {
+      _pairedDeviceName = deviceName;
+      _pairedDeviceId = deviceId;
+    }
+  }
+
+  Future<void> _clearStoredPairedDevice() async {
+    final prefs = await _prefs();
+    await prefs.remove('pairedDeviceName');
+    await prefs.remove('pairedDeviceId');
+    await prefs.remove('pairedDeviceType');
   }
 
   Future<void> _loadCurrentUser() async {
@@ -212,14 +262,6 @@ class _HomeScreenState extends State<HomeScreen> {
     try {
       setState(() => _currentUser = AppUser.fromJsonString(value));
     } catch (_) {}
-  }
-
-  Future<void> _loadPairedDevice() async {
-    final prefs = await _prefs();
-    setState(() {
-      _pairedDeviceName = prefs.getString('pairedDeviceName') ?? '';
-      _pairedDeviceId = prefs.getString('pairedDeviceId') ?? '';
-    });
   }
 
   Future<void> _loadMeasurements() async {
@@ -251,6 +293,42 @@ class _HomeScreenState extends State<HomeScreen> {
     final mins = seconds ~/ 60;
     final secs = seconds.truncate() % 60;
     return '${mins.toString().padLeft(2, '0')}:${secs.toString().padLeft(2, '0')}';
+  }
+
+  Iterable<String> _allRecordedCsvPaths() {
+    return _measurements
+        .expand((m) => m.csvPaths)
+        .where((p) => p.trim().isNotEmpty)
+        .toSet();
+  }
+
+  Future<({int deleted, int missing, int failed})> _deleteCsvFiles(
+    Iterable<String> paths,
+  ) async {
+    var deleted = 0;
+    var missing = 0;
+    var failed = 0;
+
+    for (final path in paths.toSet()) {
+      try {
+        final file = File(path);
+        if (await file.exists()) {
+          await file.delete();
+          deleted++;
+        } else {
+          missing++;
+        }
+      } catch (_) {
+        failed++;
+      }
+    }
+
+    return (deleted: deleted, missing: missing, failed: failed);
+  }
+
+  String _fileNameFromPath(String path) {
+    final normalized = path.replaceAll('\\', '/');
+    return normalized.split('/').last;
   }
 
   // ── Start / Stop nagrywania ────────────────────────────────────────────────
@@ -326,17 +404,24 @@ class _HomeScreenState extends State<HomeScreen> {
       }
     } else {
       // START
-      if (_bleService.isConnected) {
-        try {
-          await _bleService.startIMU();
-        } catch (e) {
-          if (mounted) {
-            ScaffoldMessenger.of(
-              context,
-            ).showSnackBar(SnackBar(content: Text('Błąd IMU: $e')));
-          }
-          return;
+      if (!_bleService.isConnected) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Najpierw połącz urządzenie MetaWear.')),
+          );
         }
+        return;
+      }
+
+      try {
+        await _bleService.startIMU();
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(
+            context,
+          ).showSnackBar(SnackBar(content: Text('Błąd IMU: $e')));
+        }
+        return;
       }
       setState(() {
         _recordingTime = 0;
@@ -355,30 +440,39 @@ class _HomeScreenState extends State<HomeScreen> {
 
   // ── Rozłącz / Podłącz ponownie ────────────────────────────────────────────
   Future<void> _reconnect() async {
+    if (_bleService.isConnected) {
+      await _bleService.disconnect();
+      if (mounted) {
+        setState(() {
+          _pairedDeviceId = '';
+          _pairedDeviceName = '';
+        });
+      }
+      return;
+    }
+
     if (_pairedDeviceId.isEmpty) {
       await _openPairing();
       return;
     }
-    if (_bleService.isConnected) {
-      await _bleService.disconnect();
-    } else {
-      try {
-        await _bleService.connect(_pairedDeviceId);
-        await _bleService.initializeBoard();
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('Ponownie połączono!'),
-              backgroundColor: AppColors.success,
-            ),
-          );
-        }
-      } catch (e) {
-        if (mounted) {
-          ScaffoldMessenger.of(
-            context,
-          ).showSnackBar(SnackBar(content: Text('Błąd połączenia: $e')));
-        }
+
+    try {
+      await _bleService.connect(_pairedDeviceId);
+      await _bleService.initializeBoard();
+      if (mounted) {
+        setState(() {});
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Ponownie połączono!'),
+            backgroundColor: AppColors.success,
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Błąd połączenia: $e')));
       }
     }
   }
@@ -402,10 +496,26 @@ class _HomeScreenState extends State<HomeScreen> {
       ),
     );
     if (ok == true) {
+      final deleteResult = await _deleteCsvFiles(m.csvPaths);
+
       setState(
         () => _measurements = _measurements.where((x) => x.id != m.id).toList(),
       );
       _saveMeasurements();
+
+      if (mounted) {
+        final message =
+            'Usunięto pomiar i ${deleteResult.deleted} plik(ów) CSV'
+            '${deleteResult.missing > 0 ? ', brakujących: ${deleteResult.missing}' : ''}'
+            '${deleteResult.failed > 0 ? ', błędy: ${deleteResult.failed}' : ''}.';
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(message),
+            backgroundColor:
+                deleteResult.failed > 0 ? AppColors.warning : AppColors.success,
+          ),
+        );
+      }
     }
   }
 
@@ -428,22 +538,88 @@ class _HomeScreenState extends State<HomeScreen> {
       ),
     );
     if (ok == true) {
+      final deleteResult = await _deleteCsvFiles(_allRecordedCsvPaths());
+
       setState(() => _measurements = []);
       final prefs = await _prefs();
       await prefs.remove('measurements');
+
+      if (mounted) {
+        final message =
+            'Usunięto pomiary i ${deleteResult.deleted} plik(ów) CSV'
+            '${deleteResult.missing > 0 ? ', brakujących: ${deleteResult.missing}' : ''}'
+            '${deleteResult.failed > 0 ? ', błędy: ${deleteResult.failed}' : ''}.';
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(message),
+            backgroundColor:
+                deleteResult.failed > 0 ? AppColors.warning : AppColors.success,
+          ),
+        );
+      }
     }
   }
 
   Future<void> _exportFile() async {
     if (_measurements.isEmpty) return;
-    final buffer = StringBuffer();
-    buffer.writeln('Ruch,Strona,Czas (s),Data,Pliki CSV');
-    for (final m in _measurements) {
-      final date = DateTime.fromMillisecondsSinceEpoch(m.timestamp).toLocal();
-      final side = m.side == 'left' ? 'Lewa' : 'Prawa';
-      buffer.writeln(
-        '"${m.movement}","$side",${m.duration.toStringAsFixed(2)},"$date","${m.csvPaths.join(';')}"',
-      );
+
+    final allPaths = _allRecordedCsvPaths().toList();
+    if (allPaths.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Brak zapisanych plików CSV do eksportu.')),
+        );
+      }
+      return;
+    }
+
+    final existingFiles = <File>[];
+    for (final path in allPaths) {
+      final f = File(path);
+      if (await f.exists()) {
+        existingFiles.add(f);
+      }
+    }
+
+    if (existingFiles.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Nie znaleziono istniejących plików CSV.')),
+        );
+      }
+      return;
+    }
+
+    final archive = Archive();
+    final usedNames = <String, int>{};
+
+    for (final file in existingFiles) {
+      final bytes = await file.readAsBytes();
+      final baseName = _fileNameFromPath(file.path);
+      final count = usedNames.update(baseName, (v) => v + 1, ifAbsent: () => 1);
+
+      var entryName = baseName;
+      if (count > 1) {
+        final dot = baseName.lastIndexOf('.');
+        if (dot > 0) {
+          entryName =
+              '${baseName.substring(0, dot)}_$count${baseName.substring(dot)}';
+        } else {
+          entryName = '${baseName}_$count';
+        }
+      }
+
+      archive.addFile(ArchiveFile(entryName, bytes.length, bytes));
+    }
+
+    final zipBytes = ZipEncoder().encode(archive);
+    if (zipBytes == null) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Nie udało się utworzyć pliku ZIP.')),
+        );
+      }
+      return;
     }
 
     final dirPath = _saveDir.isNotEmpty
@@ -454,19 +630,19 @@ class _HomeScreenState extends State<HomeScreen> {
       await dir.create(recursive: true);
     }
 
-    final fileName = 'pomiary_${DateTime.now().millisecondsSinceEpoch}.csv';
+    final fileName = 'pomiary_${DateTime.now().millisecondsSinceEpoch}.zip';
     final exportPath = '${dir.path}${Platform.pathSeparator}$fileName';
-    final file = File(exportPath);
-    await file.writeAsString(buffer.toString(), encoding: utf8);
+    final zipFile = File(exportPath);
+    await zipFile.writeAsBytes(zipBytes, flush: true);
 
     await SharePlus.instance.share(
-      ShareParams(files: [XFile(file.path, mimeType: 'text/csv')]),
+      ShareParams(files: [XFile(zipFile.path, mimeType: 'application/zip')]),
     );
 
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('Zapisano eksport CSV: $exportPath'),
+          content: Text('Wyeksportowano ZIP (${existingFiles.length} plików): $exportPath'),
           backgroundColor: AppColors.success,
         ),
       );
@@ -885,7 +1061,9 @@ class _HomeScreenState extends State<HomeScreen> {
 
             // Start / Stop
             ElevatedButton.icon(
-              onPressed: _toggleRecording,
+              onPressed: (_isRecording || _bleService.isConnected)
+                  ? _toggleRecording
+                  : null,
               style: ElevatedButton.styleFrom(
                 backgroundColor: _isRecording
                     ? AppColors.danger
@@ -1045,7 +1223,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 minimumSize: const Size.fromHeight(48),
               ),
               icon: const Icon(Icons.download),
-              label: const Text('Eksportuj plik CSV'),
+              label: const Text('Eksportuj ZIP (CSV)'),
             ),
           ],
         ),
@@ -1129,3 +1307,4 @@ class _SensorTile extends StatelessWidget {
     );
   }
 }
+

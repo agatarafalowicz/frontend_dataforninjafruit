@@ -4,7 +4,6 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:permission_handler/permission_handler.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:frontend_dataforninjafruit/models/metawear_device.dart';
 import 'package:frontend_dataforninjafruit/services/metawear_service.dart';
@@ -135,20 +134,21 @@ class _BluetoothPairingScreenState extends State<BluetoothPairingScreen> {
       await _service.connect(device.id);
       await _service.initializeBoard();
 
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setString('pairedDeviceName', device.name);
-      await prefs.setString('pairedDeviceId', device.id);
-      await prefs.setString('pairedDeviceType', 'MetaMotion');
-
       if (!mounted) return;
       Navigator.of(context, rootNavigator: true).pop();
 
+      final result = <String, dynamic>{
+        'service': _service,
+        'deviceId': device.id,
+        'deviceName': device.name,
+      };
+
       if (Navigator.of(context).canPop()) {
-        Navigator.of(context).pop(_service);
+        Navigator.of(context).pop(result);
       } else {
         Navigator.of(
           context,
-        ).pushNamedAndRemoveUntil('/home', (_) => false, arguments: _service);
+        ).pushNamedAndRemoveUntil('/home', (_) => false, arguments: result);
       }
     } catch (e) {
       if (mounted) {
