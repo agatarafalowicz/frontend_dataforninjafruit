@@ -15,10 +15,12 @@ class MetaWearService {
   final _accCtrl  = StreamController<SensorSample>.broadcast();
   final _gyroCtrl = StreamController<SensorSample>.broadcast();
   final _logCtrl  = StreamController<String>.broadcast();
+  final _connectionCtrl = StreamController<bool>.broadcast();
 
   Stream<SensorSample> get accStream  => _accCtrl.stream;
   Stream<SensorSample> get gyroStream => _gyroCtrl.stream;
   Stream<String>       get logStream  => _logCtrl.stream;
+  Stream<bool>         get connectionStateStream => _connectionCtrl.stream;
 
   bool get isConnected => _cmd != null;
   bool _running = false;
@@ -82,14 +84,19 @@ class MetaWearService {
   Future<void> connect(String mac) async {
     _log('Łączę z $mac...');
     _device = BluetoothDevice.fromId(mac);
+    _emitConnectionState(false);
     await _connectDevice();
   }
 
   Future<void> _connectDevice() async {
     await _device!.connect(license: License.free, timeout: const Duration(seconds: 15));
     _device!.connectionState.listen((s) {
+      if (s == BluetoothConnectionState.connected) {
+        _emitConnectionState(true);
+      }
       if (s == BluetoothConnectionState.disconnected) {
         _cmd = null; _notify = null; _running = false;
+        _emitConnectionState(false);
         _log('Rozłączono.');
       }
     });
@@ -102,11 +109,15 @@ class MetaWearService {
         if (u == kNotifyUuid.toLowerCase())  _notify = c;
       }
     }
-    if (_cmd == null) throw Exception('Nie znaleziono MetaWear');
+    if (_cmd == null) {
+      _emitConnectionState(false);
+      throw Exception('Nie znaleziono MetaWear');
+    }
     if (_notify != null) {
       await _notify!.setNotifyValue(true);
       _notifySub = _notify!.lastValueStream.listen(_onNotify);
     }
+    _emitConnectionState(true);
     _log('Połączono ✓');
   }
 
@@ -114,6 +125,10 @@ class MetaWearService {
     if (_running) await stopIMU();
     await _notifySub?.cancel();
     await _device?.disconnect();
+    _cmd = null;
+    _notify = null;
+    _running = false;
+    _emitConnectionState(false);
   }
 
   // ── Inicjalizacja board ─────────────────────────────────────────────────
@@ -223,9 +238,16 @@ class MetaWearService {
 
   void _log(String msg) => _logCtrl.add(msg);
 
+  void _emitConnectionState(bool connected) {
+    if (!_connectionCtrl.isClosed) {
+      _connectionCtrl.add(connected);
+    }
+  }
+
   void dispose() {
     _accCtrl.close();
     _gyroCtrl.close();
     _logCtrl.close();
+    _connectionCtrl.close();
   }
 }
