@@ -48,6 +48,31 @@ class _BluetoothPairingScreenState extends State<BluetoothPairingScreen> {
         Permission.bluetoothConnect,
         Permission.locationWhenInUse,
       ].request();
+    } else if (Platform.isIOS) {
+      final bt = await Permission.bluetooth.request();
+      if (!mounted) return;
+      if (bt.isDenied || bt.isPermanentlyDenied) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Potrzebny jest dostęp do Bluetooth. Włącz go w Ustawieniach aplikacji.',
+            ),
+          ),
+        );
+        return;
+      }
+      final adapter = await FlutterBluePlus.adapterState
+          .where((s) => s != BluetoothAdapterState.unknown)
+          .first;
+      if (!mounted) return;
+      if (adapter != BluetoothAdapterState.on) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Włącz Bluetooth w ustawieniach telefonu, aby skanować urządzenia.'),
+          ),
+        );
+        return;
+      }
     }
     _startScan();
   }
@@ -333,7 +358,9 @@ class _BluetoothPairingScreenState extends State<BluetoothPairingScreen> {
                             subtitle: Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
-                                Text('MAC: ${device.id}'),
+                                Text(
+                                  '${Platform.isIOS ? 'UUID' : 'MAC'}: ${device.id}',
+                                ),
                                 Text(
                                   'Sygnał: ${device.rssi} dBm',
                                   style: const TextStyle(
