@@ -7,26 +7,26 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'metawear_protocol.dart';
 
 class MetaWearService {
-  BluetoothDevice?         _device;
+  BluetoothDevice? _device;
   BluetoothCharacteristic? _cmd;
   BluetoothCharacteristic? _notify;
-  StreamSubscription?      _notifySub;
+  StreamSubscription? _notifySub;
 
-  final _accCtrl  = StreamController<SensorSample>.broadcast();
+  final _accCtrl = StreamController<SensorSample>.broadcast();
   final _gyroCtrl = StreamController<SensorSample>.broadcast();
-  final _logCtrl  = StreamController<String>.broadcast();
+  final _logCtrl = StreamController<String>.broadcast();
   final _connectionCtrl = StreamController<bool>.broadcast();
 
-  Stream<SensorSample> get accStream  => _accCtrl.stream;
+  Stream<SensorSample> get accStream => _accCtrl.stream;
   Stream<SensorSample> get gyroStream => _gyroCtrl.stream;
-  Stream<String>       get logStream  => _logCtrl.stream;
-  Stream<bool>         get connectionStateStream => _connectionCtrl.stream;
+  Stream<String> get logStream => _logCtrl.stream;
+  Stream<bool> get connectionStateStream => _connectionCtrl.stream;
 
   bool get isConnected => _cmd != null;
   bool _running = false;
   bool get isRunning => _running;
 
-  final _accBuf  = <SensorSample>[];
+  final _accBuf = <SensorSample>[];
   final _gyroBuf = <SensorSample>[];
   DateTime? _startTime;
 
@@ -55,7 +55,8 @@ class MetaWearService {
     final sub = FlutterBluePlus.scanResults.listen((results) {
       for (final r in results) {
         final uuids = r.advertisementData.serviceUuids
-            .map((u) => u.toString().toLowerCase()).toList();
+            .map((u) => u.toString().toLowerCase())
+            .toList();
         if (r.device.platformName.toLowerCase().contains('metawear') ||
             uuids.contains(kServiceUuid.toLowerCase())) {
           if (!completer.isCompleted) {
@@ -89,24 +90,30 @@ class MetaWearService {
   }
 
   Future<void> _connectDevice() async {
-    await _device!.connect(license: License.free, timeout: const Duration(seconds: 15));
+    await _device!.connect(
+      license: License.free,
+      timeout: const Duration(seconds: 15),
+    );
     _device!.connectionState.listen((s) {
       if (s == BluetoothConnectionState.connected) {
         _emitConnectionState(true);
       }
       if (s == BluetoothConnectionState.disconnected) {
-        _cmd = null; _notify = null; _running = false;
+        _cmd = null;
+        _notify = null;
+        _running = false;
         _emitConnectionState(false);
         _log('Rozłączono.');
       }
     });
     await _device!.discoverServices();
     for (final svc in _device!.servicesList) {
-      if (svc.uuid.toString().toLowerCase() != kServiceUuid.toLowerCase()) continue;
+      if (svc.uuid.toString().toLowerCase() != kServiceUuid.toLowerCase())
+        continue;
       for (final c in svc.characteristics) {
         final u = c.uuid.toString().toLowerCase();
-        if (u == kCommandUuid.toLowerCase()) _cmd    = c;
-        if (u == kNotifyUuid.toLowerCase())  _notify = c;
+        if (u == kCommandUuid.toLowerCase()) _cmd = c;
+        if (u == kNotifyUuid.toLowerCase()) _notify = c;
       }
     }
     if (_cmd == null) {
@@ -135,9 +142,30 @@ class MetaWearService {
 
   Future<void> initializeBoard() async {
     _log('Inicjalizuję board...');
-    final modules = [0x00,0x01,0x02,0x03,0x04,0x05,0x06,0x07,
-      0x08,0x09,0x0a,0x0b,0x0c,0x0d,0x0f,0x10,
-      0x11,0x12,0x13,0x14,0x15,0xfe];
+    final modules = [
+      0x00,
+      0x01,
+      0x02,
+      0x03,
+      0x04,
+      0x05,
+      0x06,
+      0x07,
+      0x08,
+      0x09,
+      0x0a,
+      0x0b,
+      0x0c,
+      0x0d,
+      0x0f,
+      0x10,
+      0x11,
+      0x12,
+      0x13,
+      0x14,
+      0x15,
+      0xfe,
+    ];
     for (final m in modules) {
       await _send([m, 0x80]);
       await Future.delayed(const Duration(milliseconds: 30));
@@ -176,7 +204,9 @@ class MetaWearService {
     _running = false;
     _log('■ Streaming stop — zapisuję CSV...');
     final paths = await _saveCsv();
-    for (final p in paths) { _log('💾 $p'); }
+    for (final p in paths) {
+      _log('💾 $p');
+    }
     return paths;
   }
 
@@ -184,44 +214,71 @@ class MetaWearService {
 
   void _onNotify(List<int> b) {
     final acc = parseAcc(b);
-    if (acc != null) { _accCtrl.add(acc); if (_running) _accBuf.add(acc); return; }
+    if (acc != null) {
+      _accCtrl.add(acc);
+      if (_running) _accBuf.add(acc);
+      return;
+    }
     final gyro = parseGyro(b);
-    if (gyro != null) { _gyroCtrl.add(gyro); if (_running) _gyroBuf.add(gyro); }
+    if (gyro != null) {
+      _gyroCtrl.add(gyro);
+      if (_running) _gyroBuf.add(gyro);
+    }
   }
 
   // ── Zapis CSV ───────────────────────────────────────────────────────────
 
   Future<List<String>> _saveCsv() async {
     final dirPath = await getSaveDir();
-    final dir     = Directory(dirPath);
+    final dir = Directory(dirPath);
     if (!await dir.exists()) await dir.create(recursive: true);
 
-    final ts  = _startTime!.toIso8601String().replaceAll(':', '_').replaceAll('.', '_');
+    final ts = _startTime!
+        .toIso8601String()
+        .replaceAll(':', '_')
+        .replaceAll('.', '_');
     final mac = _device?.remoteId.toString().replaceAll(':', '') ?? 'UNKNOWN';
 
     String fmt(double v) => v.toStringAsFixed(3);
+    final accFixed = _resampleLinear(_accBuf, const Duration(milliseconds: 20));
+    final gyroFixed = _resampleLinear(
+      _gyroBuf,
+      const Duration(milliseconds: 20),
+    );
 
     // Akcelerometr
     final accPath = '$dirPath/MetaWear_${ts}_${mac}_Accelerometer.csv';
-    final accSb   = StringBuffer();
-    accSb.writeln('epoch (ms),time (01:00),elapsed (s),x-axis (g),y-axis (g),z-axis (g)');
-    final t0a = _accBuf.isNotEmpty ? _accBuf.first.time.millisecondsSinceEpoch : 0;
-    for (final s in _accBuf) {
+    final accSb = StringBuffer();
+    accSb.writeln(
+      'epoch (ms),time (01:00),elapsed (s),x-axis (g),y-axis (g),z-axis (g)',
+    );
+    final t0a = accFixed.isNotEmpty
+        ? accFixed.first.time.millisecondsSinceEpoch
+        : 0;
+    for (final s in accFixed) {
       final el = (s.time.millisecondsSinceEpoch - t0a) / 1000;
-      accSb.writeln('${s.time.millisecondsSinceEpoch},${s.time.toIso8601String()},'
-          '${el.toStringAsFixed(3)},${fmt(s.x)},${fmt(s.y)},${fmt(s.z)}');
+      accSb.writeln(
+        '${s.time.millisecondsSinceEpoch},${s.time.toIso8601String()},'
+        '${el.toStringAsFixed(3)},${fmt(s.x)},${fmt(s.y)},${fmt(s.z)}',
+      );
     }
     await File(accPath).writeAsString(accSb.toString());
 
     // Żyroskop
     final gyroPath = '$dirPath/MetaWear_${ts}_${mac}_Gyroscope.csv';
-    final gyroSb   = StringBuffer();
-    gyroSb.writeln('epoch (ms),time (01:00),elapsed (s),x-axis (deg/s),y-axis (deg/s),z-axis (deg/s)');
-    final t0g = _gyroBuf.isNotEmpty ? _gyroBuf.first.time.millisecondsSinceEpoch : 0;
-    for (final s in _gyroBuf) {
+    final gyroSb = StringBuffer();
+    gyroSb.writeln(
+      'epoch (ms),time (01:00),elapsed (s),x-axis (deg/s),y-axis (deg/s),z-axis (deg/s)',
+    );
+    final t0g = gyroFixed.isNotEmpty
+        ? gyroFixed.first.time.millisecondsSinceEpoch
+        : 0;
+    for (final s in gyroFixed) {
       final el = (s.time.millisecondsSinceEpoch - t0g) / 1000;
-      gyroSb.writeln('${s.time.millisecondsSinceEpoch},${s.time.toIso8601String()},'
-          '${el.toStringAsFixed(3)},${fmt(s.x)},${fmt(s.y)},${fmt(s.z)}');
+      gyroSb.writeln(
+        '${s.time.millisecondsSinceEpoch},${s.time.toIso8601String()},'
+        '${el.toStringAsFixed(3)},${fmt(s.x)},${fmt(s.y)},${fmt(s.z)}',
+      );
     }
     await File(gyroPath).writeAsString(gyroSb.toString());
 
@@ -234,6 +291,60 @@ class MetaWearService {
     if (_cmd == null) return;
     await _cmd!.write(b, withoutResponse: true);
     await Future.delayed(const Duration(milliseconds: 30));
+  }
+
+  List<SensorSample> _resampleLinear(
+    List<SensorSample> samples,
+    Duration step,
+  ) {
+    if (samples.isEmpty) return [];
+    if (samples.length == 1) return List<SensorSample>.from(samples);
+
+    final sorted = List<SensorSample>.from(samples)
+      ..sort((a, b) => a.time.compareTo(b.time));
+
+    final start = sorted.first.time.millisecondsSinceEpoch;
+    final end = sorted.last.time.millisecondsSinceEpoch;
+    final stepMs = step.inMilliseconds;
+    if (stepMs <= 0) return sorted;
+
+    final out = <SensorSample>[];
+    var i = 0;
+
+    for (var t = start; t <= end; t += stepMs) {
+      while (i + 1 < sorted.length &&
+          sorted[i + 1].time.millisecondsSinceEpoch < t) {
+        i++;
+      }
+
+      if (i + 1 >= sorted.length) break;
+
+      final a = sorted[i];
+      final b = sorted[i + 1];
+      final ta = a.time.millisecondsSinceEpoch;
+      final tb = b.time.millisecondsSinceEpoch;
+
+      if (tb == ta) {
+        out.add(
+          SensorSample(DateTime.fromMillisecondsSinceEpoch(t), a.x, a.y, a.z),
+        );
+        continue;
+      }
+
+      final ratio = (t - ta) / (tb - ta);
+      double lerp(double x, double y) => x + (y - x) * ratio;
+
+      out.add(
+        SensorSample(
+          DateTime.fromMillisecondsSinceEpoch(t),
+          lerp(a.x, b.x),
+          lerp(a.y, b.y),
+          lerp(a.z, b.z),
+        ),
+      );
+    }
+
+    return out;
   }
 
   void _log(String msg) => _logCtrl.add(msg);
