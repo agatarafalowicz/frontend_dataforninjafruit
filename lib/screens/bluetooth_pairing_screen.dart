@@ -5,9 +5,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:permission_handler/permission_handler.dart';
 
-import 'package:frontend_dataforninjafruit/models/metawear_device.dart';
-import 'package:frontend_dataforninjafruit/services/metawear_service.dart';
-import 'package:frontend_dataforninjafruit/services/metawear_protocol.dart';
+import '../models/metawear_device.dart';
+import '../services/metawear_service.dart';
+import '../services/metawear_protocol.dart';
 import 'package:frontend_dataforninjafruit/theme/app_theme.dart';
 
 class BluetoothPairingScreen extends StatefulWidget {
